@@ -212,10 +212,14 @@ struct SuspectFinderTests {
             "nothing checks that the app each installer belongs to is installed"
         )
 
+        // The inspector must agree with the row, and must not describe a fresh download as one
+        // untouched for two weeks.
         let subject = Classifier(home: tree.path, catalog: try catalog())
-        let single = subject.classify(path: old.path, isDirectory: false)
-        #expect(single.verdict == installers.rule.verdict, "the row and the inspector must agree")
-        #expect(single.ruleID == "downloads-installers")
+        let listed = subject.classify(path: old.path, isDirectory: false)
+        let recent = subject.classify(path: fresh.path, isDirectory: false)
+        #expect(listed.verdict == installers.rule.verdict, "the row and the inspector must agree")
+        #expect(recent.verdict == .reviewFirst)
+        #expect(recent.ruleID != installers.rule.id, "the report leaves this file out, so the inspector must too")
     }
 
     @Test("A node_modules without a project beside it is not counted as a safe-to-clear dependency tree")

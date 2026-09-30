@@ -81,6 +81,7 @@
     },
     {
       "id": "downloads-installers",
+      "comment": "review_first until Jaaga can verify the matching app is installed; only then would safe_to_clear be honest. See docs/development.md.",
       "title": "Installers",
       "kind": "Disk images and packages",
       "category": "downloads",

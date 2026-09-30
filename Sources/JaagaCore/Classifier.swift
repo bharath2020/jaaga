@@ -38,8 +38,6 @@ public struct Classifier: Sendable {
     private let rulesByPath: [String: SuspectRule]
     /// Rules that match on a directory name, e.g. `node_modules`.
     private let rulesByDirectoryName: [String: SuspectRule]
-    /// Rules that match files by extension in one folder, e.g. installers in Downloads.
-    private let fileRules: [(folder: String, extensions: Set<String>, rule: SuspectRule)]
 
     public init(home: String, catalog: SuspectCatalog) {
         self.home = (home as NSString).standardizingPath
@@ -47,20 +45,18 @@ public struct Classifier: Sendable {
 
         var byPath: [String: SuspectRule] = [:]
         var byName: [String: SuspectRule] = [:]
-        var files: [(folder: String, extensions: Set<String>, rule: SuspectRule)] = []
         for rule in catalog.rules {
             switch rule.match {
             case .path(let relative):
                 byPath[Classifier.absolute(relative, home: self.home)] = rule
             case .directoryName(let name, _, _, _):
                 byName[name] = rule
-            case .filesWithExtensions(let extensions, let root, _):
-                files.append((Classifier.absolute(root, home: self.home), Set(extensions.map { $0.lowercased() }), rule))
+            case .filesWithExtensions:
+                break
             }
         }
         self.rulesByPath = byPath
         self.rulesByDirectoryName = byName
-        self.fileRules = files
     }
 
     static func absolute(_ path: String, home: String) -> String {
@@ -95,20 +91,6 @@ public struct Classifier: Sendable {
                 ),
                 path: standardized,
                 manifests: manifests
-            )
-        }
-
-        if !isDirectory,
-           let match = fileRules.first(where: {
-               $0.folder == (standardized as NSString).deletingLastPathComponent
-                   && $0.extensions.contains((name as NSString).pathExtension.lowercased())
-           }) {
-            return Classification(
-                category: match.rule.category,
-                verdict: match.rule.verdict,
-                reason: match.rule.reason(matchCount: 1),
-                kind: match.rule.kind,
-                ruleID: match.rule.id
             )
         }
 

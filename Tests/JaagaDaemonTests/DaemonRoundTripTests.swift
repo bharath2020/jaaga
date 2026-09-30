@@ -532,6 +532,18 @@ struct DaemonRoundTripTests {
         }
     }
 
+    @Test("A refreshed suspects report is kept, so the next request does not measure everything again")
+    func refreshedSuspectsAreCached() async throws {
+        try await withDaemon { fixture in
+            try fixture.buildSampleTree()
+
+            let refreshed = try await fixture.client.suspects(refresh: true)
+            let next = try await fixture.client.suspects()
+
+            #expect(next.scannedAt == refreshed.scannedAt, "the second answer should be the cached report")
+        }
+    }
+
     @Test("The suspects report answers for the root that was asked about, not the last one measured")
     func suspectsFollowTheirRoot() async throws {
         try await withDaemon { fixture in

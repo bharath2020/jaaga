@@ -67,4 +67,5 @@ than being silently left out of the total.
 ## Not done yet
 
 The CLI. The MCP server. Dark appearance. App Store sandboxing. Signing and notarization. Aggregating
-across volumes beyond listing them.
+across volumes beyond listing them. Checking that the app an installer in Downloads belongs to is
+installed, so those installers can be called safe to clear rather than left at review first.

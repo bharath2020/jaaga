@@ -495,7 +495,7 @@ public actor DaemonService {
 
             if match.pathsAreDirectories {
                 for path in match.paths {
-                    if parameters.refresh { invalidate(path) }
+                    if parameters.refresh { cache.invalidateSubtree(path) }
                     do {
                         let record = try await measureDirectory(at: path, origin: origin)
                         bytes += record.allocatedBytes
