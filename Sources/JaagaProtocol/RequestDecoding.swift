@@ -108,3 +108,27 @@ extension Entry {
         )
     }
 }
+
+extension QuickLookItem {
+    private enum ItemKey: String, CodingKey {
+        case name, path, isDirectory, allocatedBytes, contentModified, fileExtension
+        case unreadableDescendantCount
+    }
+
+    /// `unreadableDescendantCount` is newer than version 1, so it decodes as optional.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: ItemKey.self)
+        self.init(
+            name: try container.decode(String.self, forKey: .name),
+            path: try container.decode(String.self, forKey: .path),
+            isDirectory: try container.decode(Bool.self, forKey: .isDirectory),
+            allocatedBytes: try container.decode(Int64.self, forKey: .allocatedBytes),
+            contentModified: try container.decodeIfPresent(Date.self, forKey: .contentModified),
+            fileExtension: try container.decodeIfPresent(String.self, forKey: .fileExtension),
+            unreadableDescendantCount: try container.decodeIfPresent(
+                Int.self,
+                forKey: .unreadableDescendantCount
+            ) ?? 0
+        )
+    }
+}

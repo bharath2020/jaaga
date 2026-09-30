@@ -280,9 +280,14 @@ private struct ItemTile: View {
                         .padding(.horizontal, 4)
                 }
                 Spacer(minLength: 4)
-                Text(Present.size(item.allocatedBytes))
-                    .font(Theme.number(16))
-                    .monospacedDigit()
+                HStack(spacing: 3) {
+                    if !item.isComplete {
+                        IncompleteMarker(unreadableCount: item.unreadableDescendantCount, size: 10)
+                    }
+                    Text(item.isComplete ? Present.size(item.allocatedBytes) : "≥ " + Present.size(item.allocatedBytes))
+                        .font(Theme.number(16))
+                        .monospacedDigit()
+                }
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.name)

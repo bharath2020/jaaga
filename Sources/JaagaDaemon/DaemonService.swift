@@ -651,7 +651,8 @@ public actor DaemonService {
                 contentModified: child.contentModified,
                 fileExtension: child.isDirectory
                     ? nil
-                    : (child.name as NSString).pathExtension.isEmpty ? nil : (child.name as NSString).pathExtension
+                    : (child.name as NSString).pathExtension.isEmpty ? nil : (child.name as NSString).pathExtension,
+                unreadableDescendantCount: child.unreadableDescendantCount
             )
         }
 

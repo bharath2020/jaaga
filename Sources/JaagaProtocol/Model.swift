@@ -366,6 +366,12 @@ public struct QuickLookItem: Codable, Sendable, Hashable, Identifiable {
     public var allocatedBytes: Int64
     public var contentModified: Date?
     public var fileExtension: String?
+    /// How many folders inside this item could not be opened. Same meaning as on `Entry`: non-zero
+    /// makes `allocatedBytes` a lower bound. Without it a folder nobody could read shows as
+    /// "0 bytes", which reads as empty — the opposite of the truth.
+    public var unreadableDescendantCount: Int
+
+    public var isComplete: Bool { unreadableDescendantCount == 0 }
 
     public var id: String { path }
 
@@ -375,7 +381,8 @@ public struct QuickLookItem: Codable, Sendable, Hashable, Identifiable {
         isDirectory: Bool,
         allocatedBytes: Int64,
         contentModified: Date? = nil,
-        fileExtension: String? = nil
+        fileExtension: String? = nil,
+        unreadableDescendantCount: Int = 0
     ) {
         self.name = name
         self.path = path
@@ -383,6 +390,7 @@ public struct QuickLookItem: Codable, Sendable, Hashable, Identifiable {
         self.allocatedBytes = allocatedBytes
         self.contentModified = contentModified
         self.fileExtension = fileExtension
+        self.unreadableDescendantCount = unreadableDescendantCount
     }
 }
 

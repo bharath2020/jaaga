@@ -361,7 +361,10 @@ daemon's thresholds — a client should use it rather than re-deriving one.
 ### `QuickLookReport`
 
 `{entry, items, truncated, prefersSystemPreview}` — `items` is `{name, path, isDirectory,
-allocatedBytes, contentModified?, fileExtension?}`, largest first.
+allocatedBytes, contentModified?, fileExtension?, unreadableDescendantCount}`, largest first.
+
+`unreadableDescendantCount` means the same thing as on `Entry`, and matters here for the same reason:
+a folder nobody could open reports `0 bytes`, which would read as empty rather than as unmeasured.
 
 ---
 

@@ -352,6 +352,8 @@ struct DaemonRoundTripTests {
             #expect(report.items.first?.isDirectory == true)
             #expect(report.truncated, "there was more than the limit asked for")
             #expect(report.entry.verdict == .safeToClear)
+            let allComplete = report.items.allSatisfy { $0.isComplete }
+            #expect(allComplete, "nothing here was unreadable")
         }
     }
 
@@ -451,6 +453,15 @@ struct DaemonRoundTripTests {
             #expect(library.isComplete == false, "the app shows 'at least' for exactly this")
             #expect(documents.isComplete, "a folder measured in full must not be caveated")
             #expect(listing.folder.isComplete == false)
+
+            // Quick Look has to carry it too: a folder nobody could read shows "0 bytes" otherwise,
+            // which reads as empty rather than as unmeasured.
+            let quickLook = try await fixture.client.quickLook(
+                path: fixture.home.appendingPathComponent("Library").path
+            )
+            let lockedItem = try #require(quickLook.items.first { $0.name == "Locked" })
+            #expect(lockedItem.isComplete == false)
+            #expect(lockedItem.unreadableDescendantCount == 1)
 
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
         }
