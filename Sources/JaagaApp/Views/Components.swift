@@ -382,6 +382,10 @@ struct IncompleteMarker: View {
                     ? "1 folder inside could not be read, so this is a lower bound"
                     : "\(unreadableCount) folders inside could not be read, so this is a lower bound"
             )
-            .accessibilityLabel("Lower bound: \(unreadableCount) folders could not be read")
+            .accessibilityLabel(
+                unreadableCount == 1
+                    ? "Lower bound: 1 folder could not be read"
+                    : "Lower bound: \(unreadableCount) folders could not be read"
+            )
     }
 }

@@ -72,8 +72,9 @@ struct InspectorView: View {
     /// The confirmation says what will be freed and where the item goes, because "are you sure" on its
     /// own tells the user nothing they did not already know.
     private func trashExplanation(_ entry: Entry) -> String {
+        let size = Present.size(entry.allocatedBytes)
         var lines = [
-            "\(Present.size(entry.allocatedBytes)) will move to the Trash. "
+            "\(entry.isComplete ? size : "At least " + size) will move to the Trash. "
                 + "Nothing is deleted until you empty it."
         ]
         if entry.isDirectory, entry.itemCount > 0 {

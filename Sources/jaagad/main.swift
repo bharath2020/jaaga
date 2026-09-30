@@ -18,6 +18,7 @@ func fail(_ message: String) -> Never {
 var arguments = Array(CommandLine.arguments.dropFirst())
 var overriddenHome: String?
 var watchesFileSystem = true
+var printsSocketPath = false
 
 while let argument = arguments.first {
     arguments.removeFirst()
@@ -26,8 +27,8 @@ while let argument = arguments.first {
         print("jaagad \(JaagaDaemonVersion.current) (protocol \(JaagaProtocolVersion.current))")
         exit(0)
     case "--print-socket-path":
-        print(JaagaPaths.current.socketPath)
-        exit(0)
+        // Printed after parsing, so it names the socket for whatever --home says.
+        printsSocketPath = true
     case "--home":
         guard let value = arguments.first else { fail("--home needs a path") }
         arguments.removeFirst()
@@ -60,6 +61,11 @@ let configuration = DaemonConfiguration(
     home: home,
     watchesFileSystem: watchesFileSystem
 )
+
+if printsSocketPath {
+    print(configuration.paths.socketPath)
+    exit(0)
+}
 
 guard configuration.paths.socketPathFitsAddress else {
     fail(
