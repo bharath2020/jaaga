@@ -477,5 +477,5 @@ Set `"aggregate": true` when a rule is meant to sum many paths into one row.
 5. Treat `moveToTrash` as needing human consent, every time.
 
 `Sources/JaagaProtocol/DaemonClient.swift` is the reference implementation: connect, correlate, stream
-events, and cancel an abandoned request. It is about 300 lines, and a client in another language does
+events, and cancel an abandoned request. It is under 400 lines, and a client in another language does
 not need to be bigger.
