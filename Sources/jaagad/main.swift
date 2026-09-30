@@ -53,7 +53,8 @@ while let argument = arguments.first {
     }
 }
 
-let home = overriddenHome.map { ($0 as NSString).expandingTildeInPath } ?? NSHomeDirectory()
+// --home wins, then JAAGA_HOME, then the real home.
+let home = overriddenHome.map { ($0 as NSString).expandingTildeInPath } ?? JaagaPaths.currentHome
 let configuration = DaemonConfiguration(
     paths: JaagaPaths(home: URL(fileURLWithPath: home, isDirectory: true)),
     home: home,

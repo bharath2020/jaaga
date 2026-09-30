@@ -218,21 +218,29 @@ private struct NavigationRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 9) {
+            // No Spacer between the title and the badge: at this width every point counts, and
+            // "Usual suspects" has to fit beside its total without truncating.
+            HStack(spacing: 8) {
                 Image(systemName: systemImage)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(iconColor)
                     .frame(width: 16)
-                Text(title).font(Theme.text(13)).foregroundStyle(Theme.ink)
-                Spacer(minLength: 4)
+                Text(title)
+                    .font(Theme.text(13))
+                    .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 if let badge {
                     Text(badge)
                         .font(Theme.text(11, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(badgeInk)
-                        .padding(.horizontal, 7)
+                        .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(badgeBackground, in: .capsule)
+                        // Natural width, so the title truncates rather than the row wrapping.
+                        .fixedSize()
                 }
             }
             .padding(.horizontal, 8)

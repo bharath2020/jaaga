@@ -300,6 +300,42 @@ struct DaemonRoundTripTests {
         }
     }
 
+    @Test("Starring from one client is announced to the others, and so is unstarring")
+    func watchChangesReachEveryClient() async throws {
+        try await withDaemon { fixture in
+            try fixture.buildSampleTree()
+
+            let watcher = DaemonClient(socketPath: fixture.daemon.socketPath, timeout: .seconds(30))
+            try await watcher.connect(clientName: "observer")
+            let events = await watcher.events()
+
+            let caches = fixture.home.appendingPathComponent("Library/Caches").path
+            let collector = Task { () -> [Event.Name] in
+                var seen: [Event.Name] = []
+                for await event in events {
+                    switch event {
+                    case .watchUpdated(let updated) where updated.folder.path == caches:
+                        seen.append(.watchUpdated)
+                    case .watchRemoved(let removed) where removed.path == caches:
+                        seen.append(.watchRemoved)
+                        return seen
+                    default:
+                        continue
+                    }
+                }
+                return seen
+            }
+
+            // A different client does the starring; without the events, the observer's stars would
+            // silently disagree with the daemon's list.
+            try await fixture.client.watch(path: caches)
+            #expect(try await fixture.client.unwatch(path: caches))
+
+            #expect(await collector.value == [.watchUpdated, .watchRemoved])
+            await watcher.disconnect()
+        }
+    }
+
     @Test("Quick Look on a folder returns what is inside it, largest first")
     func quickLookOnAFolder() async throws {
         try await withDaemon { fixture in
@@ -392,6 +428,31 @@ struct DaemonRoundTripTests {
             #expect(unreadable.path == locked.path)
             #expect(unreadable.errnoCode == EACCES)
             #expect(unreadable.reason.isEmpty == false)
+        }
+    }
+
+    @Test("A child whose subtree was partly unreadable says so, so its size reads as a lower bound")
+    func childrenCarryTheirOwnUnreadableCount() async throws {
+        try #require(!runningAsRoot, "root can read anything")
+
+        try await withDaemon { fixture in
+            try fixture.file("Library/readable.bin", bytes: 10_000)
+            let locked = try fixture.directory("Library/Locked")
+            try fixture.file("Library/Locked/hidden.bin", bytes: 800_000)
+            try fixture.file("Documents/doc.bin", bytes: 5_000)
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+
+            let listing = try await fixture.client.listFolder(path: fixture.home.path)
+
+            let library = try #require(listing.children.first { $0.name == "Library" })
+            let documents = try #require(listing.children.first { $0.name == "Documents" })
+
+            #expect(library.unreadableDescendantCount == 1)
+            #expect(library.isComplete == false, "the app shows 'at least' for exactly this")
+            #expect(documents.isComplete, "a folder measured in full must not be caveated")
+            #expect(listing.folder.isComplete == false)
+
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
         }
     }
 

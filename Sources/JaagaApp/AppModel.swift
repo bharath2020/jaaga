@@ -200,8 +200,35 @@ final class AppModel {
                 watchedFolders.append(updated.folder)
             }
             watchedFolders.sort { $0.currentBytes > $1.currentBytes }
+            refreshStarsInPlace()
+        case .watchRemoved(let removed):
+            watchedFolders.removeAll { $0.path == removed.path }
+            refreshStarsInPlace()
         case .watchAlert(let alert):
             growthAlert = alert
+        }
+    }
+
+    /// Re-reads the entry the inspector is showing and the listing's stars, so a star toggled from
+    /// another client (or another window) changes here too.
+    private func refreshStarsInPlace() {
+        let watched = Set(watchedFolders.map(\.path))
+        if var listing {
+            for index in listing.children.indices {
+                listing.children[index].isWatched = watched.contains(listing.children[index].path)
+            }
+            listing.folder.isWatched = watched.contains(listing.folder.path)
+            self.listing = listing
+        }
+        if var selection {
+            selection.isWatched = watched.contains(selection.path)
+            self.selection = selection
+        }
+        if var report = suspectReport {
+            for index in report.suspects.indices {
+                report.suspects[index].isWatched = report.suspects[index].paths.allSatisfy(watched.contains)
+            }
+            suspectReport = report
         }
     }
 
@@ -229,6 +256,11 @@ final class AppModel {
             self.rebuildBreadcrumb(for: listing)
             // Land the selection on the biggest child, which is what the user came to look at.
             self.selection = listing.children.first ?? listing.folder
+        }
+        // The sidebar's coloured bar is derived from the home folder's measurement, so it only has
+        // something to show once that measurement exists.
+        if currentFolder?.path == homePath {
+            await loadVolumeSummary()
         }
     }
 

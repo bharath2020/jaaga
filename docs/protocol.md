@@ -153,6 +153,9 @@ has no Docker row.
 `unwatch` returns `{ok}` — `false` when the path was not watched. `watched` returns
 `{folders: [WatchedFolder]}`, largest first.
 
+Both broadcast — `watchUpdated` and `watchRemoved` — so every connected client's stars agree with the
+daemon's list. A CLI unstarring something has to change the app's star, not only its own.
+
 Watched folders are persisted to `~/Library/Application Support/Jaaga/watched.json` and re-measured
 hourly. They survive the daemon restarting; that history is the whole point of the feature.
 
@@ -247,7 +250,8 @@ right before anything works. A client that only cares about its own scans can ma
 | `scanProgress` | `{requestID?, root, currentPath, itemsScanned, bytesScanned}` | Every ~2,000 items during a scan |
 | `scanCompleted` | `{requestID?, root, allocatedBytes, itemCount, durationSeconds, unreadableCount}` | A scan finished |
 | `folderChanged` | `{paths}` | FSEvents saw a change under a watched folder, or an action changed one. Anything cached below those paths is stale |
-| `watchUpdated` | `{folder}` | A watched folder was re-measured |
+| `watchUpdated` | `{folder}` | A folder was starred, or a watched one was re-measured |
+| `watchRemoved` | `{path}` | A folder stopped being watched |
 | `watchAlert` | `{folder, accelerationFactor?, message}` | A watched folder is growing much faster than its own recent pace |
 
 ---
@@ -272,7 +276,8 @@ right before anything works. A client that only cares about its own scans can ma
   "lastOpened": 1700000000,
   "contentModified": 1700000000,
   "created": 1600000000,
-  "isWatched": true
+  "isWatched": true,
+  "unreadableDescendantCount": 0
 }
 ```
 
@@ -282,6 +287,11 @@ right before anything works. A client that only cares about its own scans can ma
 - `lastOpened` / `contentModified` / `created` — `st_atime`, `st_mtime`, `st_birthtime`. Any may be
   `null` on a filesystem that does not record it.
 - `reason` — one plain sentence, meant to be shown to a person as written.
+- `unreadableDescendantCount` — how many folders inside could not be opened. **When it is non-zero,
+  `allocatedBytes` is a lower bound** and a client must not present it as exact. There is no way to
+  say how many bytes are missing: measuring them is exactly what failed. On a real `~/Library` this
+  is routinely 150-odd TCC-protected folders until Full Disk Access is granted. Added after version 1
+  shipped, so it is absent from an older daemon's frames and should be read as `0`.
 
 ### `category`
 
@@ -370,7 +380,13 @@ one down:
 - **Hard links are counted once.** Two names for one inode occupy one set of blocks, so the second name
   adds nothing — which is what the Finder's free-space figure will also say.
 - **Unreadable folders are reported, never guessed at.** A folder that cannot be opened appears in
-  `unreadable` with its errno and `complete` goes `false`. A total that is short says so.
+  `unreadable` with its errno, `complete` goes `false` on the listing, and every `Entry` between it
+  and the scan root gets a non-zero `unreadableDescendantCount`. A total that is short says so, at
+  every level a person might read it — not only for the folder that happened to be scanned.
+
+  This matters more than it sounds: without Full Disk Access, `~/Library` is short by whatever is
+  inside 150-odd protected folders, and a number that looks precise but is not is worse than no
+  number at all.
 
 Sizes are base-10 (1 GB = 1,000,000,000 bytes) wherever they are formatted, matching the rest of macOS.
 

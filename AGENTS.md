@@ -21,6 +21,10 @@ to update whenever the wire format changes.
 - **Sizes are always allocated bytes** (`st_blocks × 512`), one volume, symlinks never followed, hard
   links counted once, unreadable folders reported rather than skipped. The rules and their rationale
   are in `DiskScanner`'s doc comment and pinned by `Tests/JaagaCoreTests/DiskScannerTests.swift`.
+- **Totals are recursive, and the `Recursive totals` suite checks them against `du -sk`.** If a size
+  ever looks wrong, that suite plus `du` is the way to settle it — and the answer has usually been
+  unreadable folders, not arithmetic. `Entry.unreadableDescendantCount` carries that caveat to every
+  level, and the UI shows "At least" rather than a figure that looks exact.
 - **`moveToTrash` is the only destructive operation and only ever moves to the Trash.** It refuses
   without `confirmed: true`, which defaults to `false` so forgetting it cannot read as consent.
 - **The usual-suspects catalog is data**: `Sources/JaagaCore/Resources/suspects.json`, with a user

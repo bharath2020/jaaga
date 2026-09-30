@@ -15,13 +15,15 @@ struct SpaceMapView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header(listing)
                 hint
-                Treemap(children: listing.children, shades: model.childShades)
+                SpaceMapCanvas(children: listing.children, shades: model.childShades)
                     .frame(minHeight: 220, idealHeight: 300, maxHeight: 340)
                 if !listing.unreadable.isEmpty {
                     UnreadableNotice(unreadable: listing.unreadable)
                 }
                 ChildrenList()
+                    .frame(maxHeight: .infinity)
             }
+            .frame(maxHeight: .infinity, alignment: .top)
         } else {
             FirstScanPlaceholder()
         }
@@ -41,6 +43,11 @@ struct SpaceMapView: View {
             }
             Spacer(minLength: 12)
             VStack(alignment: .trailing, spacing: 4) {
+                if !listing.folder.isComplete {
+                    Text("At least")
+                        .font(Theme.text(12, weight: .semibold))
+                        .foregroundStyle(Theme.alertBodyInk)
+                }
                 BigSize(bytes: listing.folder.allocatedBytes, numberSize: 34, unitSize: 16)
                 Text(diskShare(listing.folder.allocatedBytes))
                     .font(Theme.text(12))
@@ -94,14 +101,14 @@ struct SpaceMapView: View {
 }
 
 /// The treemap itself.
-private struct Treemap: View {
+private struct SpaceMapCanvas: View {
     @Environment(AppModel.self) private var model
     let children: [Entry]
     let shades: [String: Int]
 
     var body: some View {
         GeometryReader { geometry in
-            let tiles = Treemap.layout(children, in: geometry.size)
+            let tiles = SpaceMapCanvas.layout(children, in: geometry.size)
             ZStack(alignment: .topLeading) {
                 ForEach(tiles, id: \.element.path) { tile in
                     Tile(
@@ -120,8 +127,8 @@ private struct Treemap: View {
         .accessibilityLabel("Space map")
     }
 
-    static func layout(_ children: [Entry], in size: CGSize) -> [JaagaLayout.Treemap.Tile<Entry>] {
-        JaagaLayout.Treemap.squarify(
+    static func layout(_ children: [Entry], in size: CGSize) -> [Treemap.Tile<Entry>] {
+        Treemap.squarify(
             children,
             weight: { Double($0.allocatedBytes) },
             in: CGRect(origin: .zero, size: size)
@@ -189,7 +196,7 @@ private struct Tile: View {
             }
             Spacer(minLength: 0)
             if showsSize {
-                Text(Present.size(entry.allocatedBytes))
+                Text(entry.isComplete ? Present.size(entry.allocatedBytes) : "≥ " + Present.size(entry.allocatedBytes))
                     .font(Theme.number(isRoomy ? 28 : 15))
                     .tracking(-0.4)
                 if isSelected, isRoomy, entry.isDirectory {
@@ -300,10 +307,15 @@ private struct ChildRow: View {
 
             SizeBar(fraction: fraction, color: color).frame(width: 150)
 
-            Text(Present.size(entry.allocatedBytes))
-                .font(Theme.text(13, weight: .semibold))
-                .monospacedDigit()
-                .frame(width: 76, alignment: .trailing)
+            HStack(spacing: 4) {
+                if !entry.isComplete {
+                    IncompleteMarker(unreadableCount: entry.unreadableDescendantCount)
+                }
+                Text(Present.size(entry.allocatedBytes))
+                    .font(Theme.text(13, weight: .semibold))
+                    .monospacedDigit()
+            }
+            .frame(width: 76, alignment: .trailing)
 
             Text(Present.relativeDay(entry.lastOpened))
                 .font(Theme.text(12))

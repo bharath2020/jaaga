@@ -139,6 +139,8 @@ private struct ScanRun {
         var bytes: Int64 = 0
         var items: Int = 0
         var directories: Int = 0
+        /// Folders in this subtree that could not be opened, so `bytes` is short by an unknown amount.
+        var unreadable: Int = 0
 
         static let zero = Aggregate()
 
@@ -146,6 +148,7 @@ private struct ScanRun {
             lhs.bytes += rhs.bytes
             lhs.items += rhs.items
             lhs.directories += rhs.directories
+            lhs.unreadable += rhs.unreadable
         }
     }
 
@@ -181,7 +184,7 @@ private struct ScanRun {
             let code = errno
             if depth == 0 { rootErrno = code }
             noteUnreadable(directoryPath, errnoCode: code)
-            return .zero
+            return Aggregate(bytes: 0, items: 0, directories: 0, unreadable: 1)
         }
         defer { close(directoryFD) }
 
@@ -192,7 +195,7 @@ private struct ScanRun {
             let code = (error as NSError).code == NSFileReadNoPermissionError ? EACCES : errno
             if depth == 0 { rootErrno = code }
             noteUnreadable(directoryPath, errnoCode: code, message: error.localizedDescription)
-            return .zero
+            return Aggregate(bytes: 0, items: 0, directories: 0, unreadable: 1)
         }
 
         var total = Aggregate.zero
@@ -210,6 +213,7 @@ private struct ScanRun {
                 let code = errno
                 if code == EACCES || code == EPERM {
                     noteUnreadable(childPath, errnoCode: code)
+                    total.unreadable += 1
                 }
                 continue
             }
@@ -251,6 +255,7 @@ private struct ScanRun {
                 total.bytes += directoryBytes
                 total.items += subtree.items + 1
                 total.directories += subtree.directories + 1
+                total.unreadable += subtree.unreadable
 
                 let directChildren: Int? = records[childPath]?.children.count
                 children.append(
@@ -262,6 +267,7 @@ private struct ScanRun {
                         allocatedBytes: directoryBytes,
                         itemCount: subtree.items,
                         directChildCount: directChildren,
+                        unreadableDescendantCount: subtree.unreadable,
                         created: date(childStat.st_birthtimespec),
                         contentModified: date(childStat.st_mtimespec),
                         lastOpened: date(childStat.st_atimespec)

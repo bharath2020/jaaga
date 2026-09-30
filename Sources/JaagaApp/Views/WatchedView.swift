@@ -34,7 +34,9 @@ struct WatchedView: View {
                     AddWatchCard()
                 }
             }
+            .frame(maxHeight: .infinity)
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     /// A folder can already be alerting when the view opens, before any event arrives.

@@ -61,7 +61,12 @@ final class DaemonLauncher {
         }
 
         var launchAgentFailure: String?
-        if let service = launchAgentService {
+        if isUsingHomeOverride {
+            // A LaunchAgent would be started by launchd with the real home, which is not the tree the
+            // app was pointed at. Run the daemon ourselves so both agree on where to look.
+            launchAgentFailure = "\(JaagaPaths.homeOverrideVariable) is set, so the daemon runs as a "
+                + "child of this app rather than as a LaunchAgent."
+        } else if let service = launchAgentService {
             do {
                 if service.status != .enabled {
                     try service.register()
@@ -110,6 +115,10 @@ final class DaemonLauncher {
     }
 
     // MARK: - Details
+
+    private var isUsingHomeOverride: Bool {
+        ProcessInfo.processInfo.environment[JaagaPaths.homeOverrideVariable]?.isEmpty == false
+    }
 
     private var launchAgentService: SMAppService? {
         guard bundledLaunchAgentPlistURL != nil else { return nil }
@@ -165,7 +174,9 @@ final class DaemonLauncher {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = []
+        // Pass the override through, so the daemon looks at the same tree the app is asking about.
+        process.arguments = ProcessInfo.processInfo.environment[JaagaPaths.homeOverrideVariable]
+            .map { ["--home", $0] } ?? []
         // The daemon's log goes where the app's does, which for a development build is the terminal.
         process.standardOutput = FileHandle.standardError
         process.standardError = FileHandle.standardError

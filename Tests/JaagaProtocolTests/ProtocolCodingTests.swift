@@ -230,6 +230,36 @@ struct VersioningTests {
         )
     }
 
+    @Test("An entry from a daemon that predates unreadableDescendantCount still decodes")
+    func entryWithoutTheNewerFieldDecodes() throws {
+        let line = Data(
+            #"""
+            {"path":"/Users/me/Movies","name":"Movies","isDirectory":true,"allocatedBytes":96200000000,
+             "itemCount":9120,"category":"media","verdict":"review_first","reason":"Video projects.",
+             "kind":"Media folder"}
+            """#.utf8
+        )
+
+        let entry = try Wire.makeDecoder().decode(Entry.self, from: line)
+
+        #expect(entry.name == "Movies")
+        #expect(entry.unreadableDescendantCount == 0)
+        #expect(entry.isComplete, "an older daemon could not say otherwise, so assume nothing was missed")
+        #expect(entry.isWatched == false)
+        #expect(entry.directChildCount == nil)
+    }
+
+    @Test("An entry that could not be fully measured says so")
+    func entryCarriesItsLowerBoundMarker() throws {
+        var entry = Entry.sample
+        entry.unreadableDescendantCount = 153
+
+        let round = try Wire.decode(Entry.self, from: Wire.makeEncoder().encode(entry))
+
+        #expect(round.unreadableDescendantCount == 153)
+        #expect(round.isComplete == false)
+    }
+
     @Test("A frame with no version at all is read as the current one")
     func versionDefaultsToCurrent() throws {
         let line = Data(#"{"id":"1","method":"volumes"}"#.utf8)
@@ -419,6 +449,10 @@ extension Event {
             )
         case .folderChanged: .folderChanged(FolderChangedEvent(paths: ["/Users/me/Downloads"]))
         case .watchUpdated: .watchUpdated(WatchUpdatedEvent(folder: .sample))
+        case .watchRemoved:
+            .watchRemoved(
+                WatchRemovedEvent(path: "/Users/me/Library/Developer/Xcode/DerivedData")
+            )
         case .watchAlert:
             .watchAlert(
                 WatchAlertEvent(

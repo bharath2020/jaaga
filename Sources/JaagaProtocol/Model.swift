@@ -45,6 +45,16 @@ public struct Entry: Codable, Sendable, Hashable, Identifiable {
     public var contentModified: Date?
     public var created: Date?
     public var isWatched: Bool
+    /// How many folders inside this entry could not be opened.
+    ///
+    /// When it is non-zero, `allocatedBytes` is a **lower bound**: the real figure is larger by an
+    /// amount nobody can know without reading those folders. A client must not present the number as
+    /// exact. On a real `~/Library` this is routinely 150-odd TCC-protected folders until Full Disk
+    /// Access is granted, which is precisely when a total looks wrong and unexplained.
+    public var unreadableDescendantCount: Int
+
+    /// False when part of this entry's subtree could not be read.
+    public var isComplete: Bool { unreadableDescendantCount == 0 }
 
     public var id: String { path }
 
@@ -63,7 +73,8 @@ public struct Entry: Codable, Sendable, Hashable, Identifiable {
         lastOpened: Date? = nil,
         contentModified: Date? = nil,
         created: Date? = nil,
-        isWatched: Bool = false
+        isWatched: Bool = false,
+        unreadableDescendantCount: Int = 0
     ) {
         self.path = path
         self.name = name
@@ -80,6 +91,7 @@ public struct Entry: Codable, Sendable, Hashable, Identifiable {
         self.contentModified = contentModified
         self.created = created
         self.isWatched = isWatched
+        self.unreadableDescendantCount = unreadableDescendantCount
     }
 }
 

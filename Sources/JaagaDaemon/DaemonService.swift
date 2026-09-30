@@ -532,6 +532,8 @@ public actor DaemonService {
         guard let folder = try await watchedFolders().first(where: { $0.path == normalized }) else {
             throw ProtocolFailure(code: .internalError, message: "Watched folder vanished while being saved", path: normalized)
         }
+        // Announced so every other client's stars change too, not just the one that asked.
+        eventHub.publish(.watchUpdated(WatchUpdatedEvent(folder: folder)))
         return folder
     }
 
@@ -541,6 +543,9 @@ public actor DaemonService {
         watchedPaths.remove(normalized)
         folderWatcher?.setWatchedPaths(Array(watchedPaths))
         cachedSuspectReport = nil
+        if removed {
+            eventHub.publish(.watchRemoved(WatchRemovedEvent(path: normalized)))
+        }
         return removed
     }
 
@@ -688,6 +693,7 @@ public actor DaemonService {
             _ = try? await watchStore.unwatch(path: path)
             watchedPaths.remove(path)
             folderWatcher?.setWatchedPaths(Array(watchedPaths))
+            eventHub.publish(.watchRemoved(WatchRemovedEvent(path: path)))
         }
         eventHub.publish(
             .folderChanged(FolderChangedEvent(paths: [(path as NSString).deletingLastPathComponent]))
@@ -714,7 +720,8 @@ public actor DaemonService {
             lastOpened: record.lastOpened,
             contentModified: record.contentModified,
             created: record.created,
-            isWatched: isWatched
+            isWatched: isWatched,
+            unreadableDescendantCount: record.unreadable.count
         )
     }
 
@@ -735,7 +742,8 @@ public actor DaemonService {
             lastOpened: child.lastOpened,
             contentModified: child.contentModified,
             created: child.created,
-            isWatched: isWatched
+            isWatched: isWatched,
+            unreadableDescendantCount: child.unreadableDescendantCount
         )
     }
 

@@ -35,8 +35,23 @@ public struct JaagaPaths: Sendable, Hashable {
         )
     }
 
+    /// The environment variable that points Jaaga at a different home folder.
+    ///
+    /// `NSHomeDirectory()` ignores `$HOME` for a GUI app, so developing the app against a throwaway
+    /// tree — rather than scanning your real home every time you rebuild — needs its own switch. This
+    /// is the app-side equivalent of `jaagad --home`, and the launcher passes it through to the
+    /// daemon it starts.
+    public static let homeOverrideVariable = "JAAGA_HOME"
+
     public static var current: JaagaPaths {
-        JaagaPaths(home: URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true))
+        JaagaPaths(home: URL(fileURLWithPath: Self.currentHome, isDirectory: true))
+    }
+
+    public static var currentHome: String {
+        if let override = ProcessInfo.processInfo.environment[homeOverrideVariable], !override.isEmpty {
+            return (override as NSString).expandingTildeInPath
+        }
+        return NSHomeDirectory()
     }
 
     /// True when `socketPath` fits in `sockaddr_un`. A pathological home directory can break this,

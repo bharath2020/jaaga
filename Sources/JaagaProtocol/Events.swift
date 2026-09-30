@@ -51,11 +51,24 @@ public struct FolderChangedEvent: Codable, Sendable, Hashable {
     }
 }
 
+/// A folder was starred, or an already-watched one was re-measured.
 public struct WatchUpdatedEvent: Codable, Sendable, Hashable {
     public var folder: WatchedFolder
 
     public init(folder: WatchedFolder) {
         self.folder = folder
+    }
+}
+
+/// A folder stopped being watched.
+///
+/// Paired with `watchUpdated` so every client sees the same watch list: the app's stars have to change
+/// when a CLI unstars something, not only when the app itself does.
+public struct WatchRemovedEvent: Codable, Sendable, Hashable {
+    public var path: String
+
+    public init(path: String) {
+        self.path = path
     }
 }
 
@@ -78,6 +91,7 @@ public enum Event: Sendable {
     case scanCompleted(ScanCompletedEvent)
     case folderChanged(FolderChangedEvent)
     case watchUpdated(WatchUpdatedEvent)
+    case watchRemoved(WatchRemovedEvent)
     case watchAlert(WatchAlertEvent)
 
     public var name: Name {
@@ -86,6 +100,7 @@ public enum Event: Sendable {
         case .scanCompleted: .scanCompleted
         case .folderChanged: .folderChanged
         case .watchUpdated: .watchUpdated
+        case .watchRemoved: .watchRemoved
         case .watchAlert: .watchAlert
         }
     }
@@ -95,6 +110,7 @@ public enum Event: Sendable {
         case scanCompleted
         case folderChanged
         case watchUpdated
+        case watchRemoved
         case watchAlert
     }
 }

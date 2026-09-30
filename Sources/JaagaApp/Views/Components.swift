@@ -331,3 +331,57 @@ struct MetadataGrid: View {
         }
     }
 }
+
+
+/// Says that a size is short, by how many folders, and what to do about it.
+///
+/// It deliberately does not guess how many bytes are missing: the whole reason they are missing is
+/// that nobody could measure them, and inventing a figure would be worse than admitting the gap.
+struct LowerBoundNote: View {
+    let unreadableCount: Int
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.alertBodyInk)
+                .frame(width: 18, height: 18)
+                .background(Theme.suspectBadgeBackground, in: .circle)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(
+                    unreadableCount == 1
+                        ? "1 folder inside could not be read, so the real size is larger."
+                        : "\(unreadableCount) folders inside could not be read, so the real size is larger."
+                )
+                .font(Theme.text(11, weight: .semibold))
+                .foregroundStyle(Theme.alertTitleInk)
+                Text("Grant Jaaga Full Disk Access in System Settings › Privacy & Security to measure them.")
+                    .font(Theme.text(11))
+                    .foregroundStyle(Theme.alertBodyInk)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.alertBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+/// A small lock beside a size that is a lower bound, for the places with no room for a sentence.
+struct IncompleteMarker: View {
+    let unreadableCount: Int
+    var size: CGFloat = 9
+
+    var body: some View {
+        Image(systemName: "lock.fill")
+            .font(.system(size: size, weight: .semibold))
+            .foregroundStyle(Theme.alertAccent)
+            .help(
+                unreadableCount == 1
+                    ? "1 folder inside could not be read, so this is a lower bound"
+                    : "\(unreadableCount) folders inside could not be read, so this is a lower bound"
+            )
+            .accessibilityLabel("Lower bound: \(unreadableCount) folders could not be read")
+    }
+}

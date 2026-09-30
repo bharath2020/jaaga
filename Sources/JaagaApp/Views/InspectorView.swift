@@ -11,17 +11,30 @@ struct InspectorView: View {
     @State private var isConfirmingTrash = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 0) {
             if let entry = model.selection {
-                header(entry)
-                size(entry)
-                verdict(entry)
-                metadata(entry)
-                if let biggest = biggestInside(entry), !biggest.isEmpty {
-                    biggestInsideSection(biggest, of: entry)
+                // The description scrolls; the four actions stay put, so Move to Trash never slides
+                // off the bottom in a short window or behind a long path.
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        header(entry)
+                        size(entry)
+                        verdict(entry)
+                        metadata(entry)
+                        if let biggest = biggestInside(entry), !biggest.isEmpty {
+                            biggestInsideSection(biggest, of: entry)
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 8)
+                    .padding(.bottom, 18)
                 }
-                Spacer(minLength: 8)
+                .frame(maxHeight: .infinity)
+
                 actions(entry)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 20)
+                    .padding(.top, 2)
             } else {
                 Spacer()
                 Text("Select something to inspect it.")
@@ -31,9 +44,6 @@ struct InspectorView: View {
                 Spacer()
             }
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 8)
-        .padding(.bottom, 20)
         .frame(width: Theme.inspectorWidth)
         .overlay(alignment: .leading) {
             Rectangle().fill(Theme.divider).frame(width: 1)
@@ -118,12 +128,22 @@ struct InspectorView: View {
 
     private func size(_ entry: Entry) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            // "At least" whenever part of the subtree could not be read. The big number is what
+            // people act on, so it is the one place a lower bound must never pass for a total.
+            if !entry.isComplete {
+                Text("At least")
+                    .font(Theme.text(12, weight: .semibold))
+                    .foregroundStyle(Theme.alertBodyInk)
+            }
             BigSize(bytes: entry.allocatedBytes, numberSize: 40, unitSize: 17)
             SizeBar(fraction: model.shareOfDisk(entry.allocatedBytes), color: color(for: entry))
             Text(shareText(entry))
                 .font(Theme.text(12))
                 .foregroundStyle(Theme.secondaryInk)
                 .fixedSize(horizontal: false, vertical: true)
+            if !entry.isComplete {
+                LowerBoundNote(unreadableCount: entry.unreadableDescendantCount)
+            }
         }
     }
 

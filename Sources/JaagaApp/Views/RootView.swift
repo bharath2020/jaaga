@@ -42,21 +42,21 @@ struct RootView: View {
         .animation(.easeOut(duration: 0.15), value: model.isQuickLookPresented)
     }
 
+    /// Each view owns its own scrolling: the space map keeps its treemap in place and scrolls only the
+    /// list under it, while the suspects and watched views scroll their rows. Wrapping them in a
+    /// second ScrollView here would leave the inner one with no height to lay out in.
     private var main: some View {
-        ScrollView(.vertical) {
-            Group {
-                switch model.view {
-                case .spaceMap: SpaceMapView()
-                case .suspects: SuspectsView()
-                case .watched: WatchedView()
-                }
+        Group {
+            switch model.view {
+            case .spaceMap: SpaceMapView()
+            case .suspects: SuspectsView()
+            case .watched: WatchedView()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 24)
-            .padding(.top, 8)
-            .padding(.bottom, 20)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 24)
+        .padding(.top, 8)
+        .padding(.bottom, 20)
     }
 }
 

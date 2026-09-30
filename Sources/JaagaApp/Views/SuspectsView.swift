@@ -24,13 +24,16 @@ struct SuspectsView: View {
                     UnreadableNotice(unreadable: report.unreadable)
                 }
                 rows
+                    .frame(maxHeight: .infinity)
             } else {
                 ProgressView("Looking in the usual places…")
                     .font(Theme.text(13))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 40)
+                Spacer(minLength: 0)
             }
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private func summary(_ report: SuspectReport) -> some View {

@@ -63,6 +63,14 @@ swift run jaagad --home /tmp/sandbox --no-fsevents   # against a throwaway tree
 
 The app connects to an already-running daemon if it finds one.
 
+**Working against a test tree.** Scanning your real home on every rebuild is slow, so both halves take
+a `JAAGA_HOME` override (`NSHomeDirectory()` ignores `$HOME` for a GUI app, hence the separate
+variable). Keep the path short — a Unix socket address has only 103 bytes to work with.
+
+```sh
+JAAGA_HOME=/tmp/jaaga-test open -a .build/release/Jaaga.app   # or run the executable directly
+```
+
 ## Full Disk Access
 
 Without it, parts of your home folder are unreadable and the totals would be short. Jaaga never hides
@@ -71,6 +79,10 @@ bound. But you will want to grant it.
 
 **System Settings › Privacy & Security › Full Disk Access →** add `Jaaga.app`, and add `jaagad` too if
 you are running the daemon by hand from a terminal. Restart the app afterwards.
+
+Until you do, expect roughly 150 protected folders inside `~/Library` to come back unreadable. Jaaga
+shows those sizes as "At least 237.7 GB" with a lock beside them and a note saying how many folders it
+could not open — it will not print a number that looks exact when it is not.
 
 macOS will also ask separately the first time Jaaga reads folders it protects individually — your
 Music library, Photos, Desktop, Documents and Downloads. Declining is fine; those folders then show up

@@ -173,6 +173,7 @@ extension ServerFrame: Codable {
             case .scanCompleted: .scanCompleted(try payload(ScanCompletedEvent.self))
             case .folderChanged: .folderChanged(try payload(FolderChangedEvent.self))
             case .watchUpdated: .watchUpdated(try payload(WatchUpdatedEvent.self))
+            case .watchRemoved: .watchRemoved(try payload(WatchRemovedEvent.self))
             case .watchAlert: .watchAlert(try payload(WatchAlertEvent.self))
             }
             self = .event(event)
@@ -217,6 +218,7 @@ extension ServerFrame: Codable {
             case .scanCompleted(let e): try container.encode(e, forKey: .payload)
             case .folderChanged(let e): try container.encode(e, forKey: .payload)
             case .watchUpdated(let e): try container.encode(e, forKey: .payload)
+            case .watchRemoved(let e): try container.encode(e, forKey: .payload)
             case .watchAlert(let e): try container.encode(e, forKey: .payload)
             }
         }

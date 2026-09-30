@@ -62,6 +62,12 @@ public struct ChildRecord: Sendable, Hashable {
     public var itemCount: Int
     /// `nil` when this child sits below the depth the scan retained records for.
     public var directChildCount: Int?
+    /// How many folders inside this child could not be opened.
+    ///
+    /// Non-zero means `allocatedBytes` is a lower bound. Held per child rather than only for the scan
+    /// root, because the number a person reads is usually a child's — the row in the list, the block
+    /// in the map, the figure in the inspector — and that is where the caveat has to appear.
+    public var unreadableDescendantCount: Int
     public var created: Date?
     public var contentModified: Date?
     public var lastOpened: Date?
@@ -74,6 +80,7 @@ public struct ChildRecord: Sendable, Hashable {
         allocatedBytes: Int64,
         itemCount: Int,
         directChildCount: Int?,
+        unreadableDescendantCount: Int = 0,
         created: Date?,
         contentModified: Date?,
         lastOpened: Date?
@@ -85,6 +92,7 @@ public struct ChildRecord: Sendable, Hashable {
         self.allocatedBytes = allocatedBytes
         self.itemCount = itemCount
         self.directChildCount = directChildCount
+        self.unreadableDescendantCount = unreadableDescendantCount
         self.created = created
         self.contentModified = contentModified
         self.lastOpened = lastOpened
