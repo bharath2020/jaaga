@@ -21,7 +21,13 @@ Nothing in the protocol is macOS-specific beyond the paths it reports, and nothi
 JSON escapes newlines inside strings, so a bare `\n` byte always ends a frame. A client can therefore
 frame messages with a plain line reader — no length prefixes, no chunked encoding.
 
-A frame larger than 8 MiB is refused with a `malformedFrame` error and the connection is closed.
+A request frame larger than 8 MiB is refused with a `malformedFrame` error and the connection is
+closed. Frames from the daemon have no such limit: a `listFolder` of a folder with tens of thousands of
+children is tens of megabytes on one line, so a client's line reader must not cap it at a few.
+
+The daemon never waits on a slow client: its output to each connection is queued. A client that stops
+reading is disconnected once 64 MiB of output is waiting for it, or when one write has been stuck for
+30 seconds.
 
 ```
 client ──── {"v":1,"id":"1","method":"listFolder","params":{"path":"/Users/me"}} ───▶ jaagad
@@ -68,13 +74,20 @@ Every frame carries `v`, the protocol version. This document describes **version
 ```
 
 `id` is a client-chosen correlation string, echoed on the response. It only has to be unique among that
-client's in-flight requests.
+client's in-flight requests: ids are scoped to the connection, so two clients may both use `"1"`, and
+one can never cancel the other's request.
+
+Paths are absolute. A leading `~` means the daemon's home folder (the one `hello` reports as
+`homePath`), which under `jaagad --home` is not the account's own.
 
 `params` may be omitted entirely for methods that take none. Parameters marked *optional* below may be
 left out and take their stated default.
 
 Requests are handled concurrently: a long scan does not hold up later requests on the same connection,
-and responses may arrive out of order. Match them by `id`.
+and responses may arrive out of order. Match them by `id`. Frames from one connection are still taken
+up in the order they were sent, so a `cancel` never overtakes the request it cancels.
+
+When a client disconnects, everything it still had in flight is cancelled.
 
 ### `hello`
 
@@ -143,7 +156,11 @@ The catalogued folders that grow quietly, measured on this machine.
 | `refresh` | bool | optional, defaults to `false` |
 
 Result: `SuspectReport`. Rules matching nothing on this machine are left out, so a Mac without Docker
-has no Docker row.
+has no Docker row. A matched path inside a folder another rule matched is left to that rule — so
+`~/Library/Caches/Homebrew` is part of the Caches row, not a second one — and no byte is counted twice
+in `totalBytes` or `safeToClearBytes`.
+
+The report is cached per `root` until something it measured changes.
 
 ### `watch` / `unwatch` / `watched`
 
@@ -178,10 +195,14 @@ Takes `{path}`, selects it in the Finder, returns `{ok: true}`.
 
 | Parameter | Type | |
 |---|---|---|
-| `path` | string | required |
+| `path` | string | required — absolute, or starting with `~` |
 | `confirmed` | bool | optional, defaults to `false` |
 
 Result: `{originalPath, trashedPath, reclaimedBytes}`.
+
+A relative path is refused with `invalidParameters`. The home folder, anything above it, and the
+daemon's own support folder (with everything in it and above it) are refused with `notPermitted`:
+trashing them would take the whole account, or the daemon's socket and history, with them.
 
 **This is the only destructive method, and it only ever moves things to the Trash — nothing is
 permanently deleted, ever.** It refuses with `confirmationRequired` unless `confirmed` is `true`, and
@@ -243,7 +264,8 @@ present where they mean something.
 Events carry no `id`. **Every connected client receives every event** — there is no subscription
 filter, deliberately: the volume is small and a filter would be one more thing a new client has to get
 right before anything works. A client that only cares about its own scans can match
-`payload.requestID`.
+`payload.requestID`: it is present only in the copy sent to the client whose request started the scan,
+and absent from everyone else's, since an id means nothing outside the connection that chose it.
 
 | `event` | Payload | When |
 |---|---|---|
@@ -308,8 +330,11 @@ What a folder holds, for grouping and colour. A client may add more categories i
 | `your_data` | Your own files. Jaaga never suggests clearing these |
 
 The default is `your_data`. The daemon only upgrades to `safe_to_clear` when it recognises something
-specific from the catalog or a well-known folder name, because the cost of being wrong in that
-direction is somebody's work.
+specific, because the cost of being wrong in that direction is somebody's work. A name alone is never
+enough: `node_modules`, `build`, `dist`, `target` and `.build` are `safe_to_clear` only beside the
+manifest that regenerates them (`package.json`, `Cargo.toml`, `Package.swift` and the like) and never
+inside an app bundle, `Application Support` or `Containers`; a folder called `Caches` only in the
+catalogued cache location. Anything else recognised by name is `review_first` at most.
 
 ### `FolderListing`
 
@@ -376,8 +401,11 @@ one down:
 - **Allocated, not logical.** Sizes come from `st_blocks × 512`, so a sparse file costs what it really
   costs and a pile of tiny files costs its block overhead. This is the number that moves the free-space
   figure when you delete something.
-- **One volume.** A child on a different device is skipped, not folded into its parent, so a mounted
-  disk image never inflates your home folder. Volumes are listed separately instead.
+- **One volume.** A child on a different device, or a mount point of its own, is skipped, not folded
+  into its parent, so a mounted disk image never inflates your home folder. Volumes are listed
+  separately instead.
+- **A directory is counted once.** A second path to a directory already measured — the startup disk's
+  firmlinks, which make `/Users` and `/System/Volumes/Data/Users` the same folder — adds nothing.
 - **Symlinks are never followed.** A link contributes only its own few bytes. Nothing is double-counted
   and there are no traversal cycles.
 - **Hard links are counted once.** Two names for one inode occupy one set of blocks, so the second name
@@ -422,8 +450,13 @@ there with the same `id` as a shipped one replaces it.
 | `match.type` | Fields | Finds |
 |---|---|---|
 | `path` | `path` | One directory or file, relative to the scan root (or absolute with a leading `/`) |
-| `directoryName` | `name`, `roots`, `maxDepth` | Directories with that name under any of `roots`. Does not descend into one it has found, so nested copies are counted once |
+| `directoryName` | `name`, `roots`, `maxDepth`, `manifests` | Directories with that name under any of `roots`, and, when `manifests` is given, only those with one of those files beside them. Does not descend into one it has found, so nested copies are counted once, and searches a folder reached by two names (`Code` and `code` on a case-insensitive disk) once |
 | `filesWithExtensions` | `extensions`, `root`, `minimumAgeDays` | Files directly inside `root` with those extensions, optionally only ones untouched for a while |
+
+A rule missing the field that locates it — `path`, `name`, `roots`, `extensions` or `root` — is refused
+when the catalog loads, rather than read as the home folder. A `directoryName` rule without
+`manifests`, and any `filesWithExtensions` rule, is capped at `review_first`: a name or an extension
+alone never earns `safe_to_clear`.
 
 `reason` may contain `{count}` (the number of matches) and `{s}` (a plural "s", empty when the count is
 one), so an aggregate rule reads correctly whether it found one project or thirty-eight.
@@ -434,7 +467,7 @@ Set `"aggregate": true` when a rule is meant to sum many paths into one row.
 
 ## Writing a client
 
-1. Connect to the socket. If it is not there, the daemon is not running — see the README.
+1. Connect to the socket. If it is not there, the daemon is not running — see `docs/development.md`.
 2. Send `hello` and check `supportedProtocolVersions`.
 3. Read lines, decode each as JSON, and switch on `type`:
    - `response` → match `id` to your request

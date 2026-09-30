@@ -133,7 +133,8 @@ struct QuickLookPanel: View {
     }
 
     private var subtitle: String {
-        var parts = [Present.size(report.entry.allocatedBytes)]
+        let size = Present.size(report.entry.allocatedBytes)
+        var parts = [report.entry.isComplete ? size : "At least " + size]
         if report.entry.isDirectory {
             parts.append(Present.itemCount(report.entry.itemCount))
         }
@@ -210,10 +211,19 @@ struct QuickLookPanel: View {
     private var details: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
+                if !report.entry.isComplete {
+                    Text("At least")
+                        .font(Theme.text(12, weight: .semibold))
+                        .foregroundStyle(Theme.alertBodyInk)
+                }
                 BigSize(bytes: report.entry.allocatedBytes, numberSize: 34, unitSize: 15)
                 Text(share)
                     .font(Theme.text(12))
                     .foregroundStyle(Theme.secondaryInk)
+                if !report.entry.isComplete {
+                    LowerBoundNote(unreadableCount: report.entry.unreadableDescendantCount)
+                        .padding(.top, 4)
+                }
             }
 
             MetadataGrid(

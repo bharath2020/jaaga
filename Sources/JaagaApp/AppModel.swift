@@ -59,7 +59,11 @@ final class AppModel {
 
     /// The folder currently being measured, with its running counts, or nil when nothing is scanning.
     private(set) var scanProgress: ScanProgressEvent?
-    private(set) var isBusy = false
+    /// A folder the user asked to open that has not answered yet, once it has taken long enough to be
+    /// worth saying so. The previous folder's numbers must not stand in for it meanwhile.
+    private(set) var measuringPath: String?
+    var isBusy: Bool { requestsInFlight > 0 }
+    private var requestsInFlight = 0
     /// The most recent growth alert, shown at the top of the Watched view until dismissed.
     private(set) var growthAlert: WatchAlertEvent?
     private(set) var errorMessage: String?
@@ -69,6 +73,8 @@ final class AppModel {
     private var client: DaemonClient?
     private var eventTask: Task<Void, Never>?
     private var navigationTask: Task<Void, Never>?
+    /// Bumped by every navigation, so an answer for a folder the user has since left is dropped.
+    private var navigationToken = 0
     /// Folders visited on the way here, so the toolbar's back button can retrace them.
     private var history: [String] = []
 
@@ -181,18 +187,22 @@ final class AppModel {
     private func handle(_ event: Event) {
         switch event {
         case .scanProgress(let progress):
+            // The daemon only tells the client that asked which request a scan belongs to; scans for
+            // other clients and the hourly re-measure are not this window's to report.
+            guard progress.requestID != nil else { return }
             scanProgress = progress
         case .scanCompleted(let completed):
+            guard completed.requestID != nil else { return }
             scanProgress = nil
             lastScanAt = Date()
-            _ = completed
         case .folderChanged(let changed):
             // Something moved underneath us. Re-read the folder on screen if it was affected, so the
-            // window never shows a total that is known to be wrong.
+            // window never shows a total that is known to be wrong. The daemon has already dropped
+            // what changed from its cache, so this is a plain read, not a forced rescan.
             guard let folder = currentFolder else { return }
             let affected = changed.paths.contains { folder.path == $0 || folder.path.hasPrefix($0 + "/") || $0.hasPrefix(folder.path + "/") }
             guard affected else { return }
-            Task { await self.reload(refresh: true) }
+            Task { await self.reload(refresh: false) }
         case .watchUpdated(let updated):
             if let index = watchedFolders.firstIndex(where: { $0.path == updated.folder.path }) {
                 watchedFolders[index] = updated.folder
@@ -242,26 +252,61 @@ final class AppModel {
 
     // MARK: - Navigation
 
+    /// Navigates to `path`. A newer navigation supersedes this one: its request is cancelled, so the
+    /// daemon stops measuring a folder nobody is waiting for, and a late answer is never shown.
     func open(path: String, pushHistory: Bool = true, refresh: Bool = false) async {
         guard let client else { return }
-        if pushHistory, let current = currentFolder?.path, current != path {
-            history.append(current)
-        }
+        navigationTask?.cancel()
+        navigationToken += 1
+        let token = navigationToken
+        let departing = currentFolder?.path
         view = .spaceMap
         searchText = ""
-        await run {
-            let listing = try await client.listFolder(path: path, refresh: refresh)
-            self.listing = listing
-            self.lastScanAt = listing.scannedAt
-            self.rebuildBreadcrumb(for: listing)
-            // Land the selection on the biggest child, which is what the user came to look at.
-            self.selection = listing.children.first ?? listing.folder
+
+        let task = Task {
+            await self.whileMeasuring(path, token: token) {
+                await self.run {
+                    let listing = try await client.listFolder(path: path, refresh: refresh)
+                    guard self.navigationToken == token else { return }
+                    if pushHistory, let departing, departing != listing.folder.path {
+                        self.history.append(departing)
+                    }
+                    self.show(listing)
+                    // Land the selection on the biggest child, which is what the user came to look at.
+                    self.selection = listing.children.first ?? listing.folder
+                }
+            }
         }
+        navigationTask = task
+        await task.value
+
         // The sidebar's coloured bar is derived from the home folder's measurement, so it only has
         // something to show once that measurement exists.
-        if currentFolder?.path == homePath {
+        if navigationToken == token, currentFolder?.path == homePath {
             await loadVolumeSummary()
         }
+    }
+
+    /// Runs `work`, and if it is still going after a moment marks `path` as being measured. Cleared
+    /// whether the work succeeded, failed or was cancelled, so a failed scan never leaves the window
+    /// saying it is still measuring.
+    private func whileMeasuring(_ path: String, token: Int, _ work: () async -> Void) async {
+        let reveal = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, self.navigationToken == token else { return }
+            self.measuringPath = path
+        }
+        await work()
+        reveal.cancel()
+        if navigationToken == token {
+            measuringPath = nil
+        }
+    }
+
+    private func show(_ listing: FolderListing) {
+        self.listing = listing
+        lastScanAt = listing.scannedAt
+        rebuildBreadcrumb(for: listing)
     }
 
     func openFolder(_ entry: Entry) async {
@@ -313,12 +358,42 @@ final class AppModel {
         }
     }
 
+    /// Re-reads the folder on screen in place: the view, the search and the selection stay as they
+    /// are, apart from a selected item that no longer exists. A folder that has itself gone away hands
+    /// over to its parent.
     func reload(refresh: Bool = true) async {
-        guard let folder = currentFolder else { return }
-        await open(path: folder.path, pushHistory: false, refresh: refresh)
+        guard let client, let folder = currentFolder else { return }
+        let token = navigationToken
+        var vanished = false
+        await run {
+            do {
+                let listing = try await client.listFolder(path: folder.path, refresh: refresh)
+                guard self.navigationToken == token, self.currentFolder?.path == folder.path else { return }
+                self.show(listing)
+                self.reselect(in: listing)
+            } catch let failure as ProtocolFailure where failure.code == .notFound {
+                vanished = true
+            }
+        }
+        if vanished, navigationToken == token {
+            await open(path: (folder.path as NSString).deletingLastPathComponent, pushHistory: false)
+            selection = nil
+            return
+        }
         if refresh {
             await loadSuspects(refresh: true)
             await loadVolumeSummary(refresh: true)
+        }
+    }
+
+    /// Swaps the selection for its fresh copy when it belongs to this listing, or drops it when it is
+    /// gone. A selection from elsewhere, such as the suspects view, is left alone.
+    private func reselect(in listing: FolderListing) {
+        guard let selected = selection else { return }
+        if selected.path == listing.folder.path {
+            selection = listing.folder
+        } else if (selected.path as NSString).deletingLastPathComponent == listing.folder.path {
+            selection = listing.children.first { $0.path == selected.path }
         }
     }
 
@@ -416,19 +491,33 @@ final class AppModel {
         await run { try await client.reveal(path: path) }
     }
 
-    /// Moves a path to the Trash. Only ever called from a confirmation the user answered.
-    func moveToTrash(path: String) async {
+    /// Moves the entry the user confirmed to the Trash. Only ever called from that confirmation, with
+    /// the entry it showed — never whatever happens to be selected by the time the button is pressed.
+    ///
+    /// Nothing else is selected afterwards: an unrelated item must not slide under the same button.
+    func moveToTrash(_ entry: Entry) async {
         guard let client else { return }
+        var trashed = false
         await run {
-            _ = try await client.moveToTrash(path: path, confirmed: true)
-            if let folder = self.currentFolder {
-                self.listing = try await client.listFolder(path: folder.path, refresh: true)
-                self.selection = self.listing?.children.first
-            }
-            self.watchedFolders = try await client.watched()
-            self.suspectReport = try await client.suspects(refresh: true)
-            self.volumeSummary = try? await client.volumeSummary(refresh: true)
+            _ = try await client.moveToTrash(path: entry.path, confirmed: true)
+            trashed = true
         }
+        guard trashed else { return }
+
+        let gone: (String) -> Bool = { $0 == entry.path || $0.hasPrefix(entry.path + "/") }
+        if let selected = selection, gone(selected.path) { selection = nil }
+        history.removeAll(where: gone)
+        if let folder = currentFolder, gone(folder.path) {
+            await open(path: (entry.path as NSString).deletingLastPathComponent, pushHistory: false)
+            selection = nil
+        } else {
+            await reload(refresh: false)
+        }
+        await run {
+            self.watchedFolders = try await client.watched()
+            self.suspectReport = try await client.suspects()
+        }
+        volumeSummary = try? await client.volumeSummary(refresh: true)
     }
 
     func loadQuickLook(for entry: Entry) async {
@@ -445,9 +534,16 @@ final class AppModel {
     }
 
     /// Runs one piece of daemon work, showing it as busy and surfacing any failure in one place.
-    private func run(_ work: @escaping () async throws -> Void) async {
-        isBusy = true
-        defer { isBusy = false }
+    ///
+    /// When the last piece of work finishes, any scan progress still showing is cleared: the daemon only
+    /// announces a scan that completed, so one that failed or was cancelled would otherwise leave
+    /// "Measuring…" up for good.
+    private func run(_ work: () async throws -> Void) async {
+        requestsInFlight += 1
+        defer {
+            requestsInFlight -= 1
+            if requestsInFlight == 0 { scanProgress = nil }
+        }
         do {
             try await work()
             errorMessage = nil

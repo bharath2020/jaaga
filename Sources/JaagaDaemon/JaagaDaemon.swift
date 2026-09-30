@@ -21,11 +21,22 @@ public final class JaagaDaemon: @unchecked Sendable {
         // Captured before `self` exists, so the server's callbacks never need a weak dance.
         self.server = UnixSocketServer(socketPath: configuration.paths.socketPath) { connection in
             hub.add(connection)
-            connection.onFrame = { connection, frame in
-                Task { await service.accept(frame: frame, from: connection) }
+            // One consumer per connection hands frames to the service in the order they arrived, so
+            // a `cancel` can never overtake the request it cancels. `accept` only starts the work, so
+            // a long scan still does not hold up the frames behind it.
+            let (frames, continuation) = AsyncStream<Data>.makeStream()
+            connection.onFrame = { _, frame in
+                continuation.yield(frame)
             }
             connection.onClose = { connection in
                 hub.remove(connection)
+                continuation.finish()
+            }
+            Task {
+                for await frame in frames {
+                    await service.accept(frame: frame, from: connection)
+                }
+                await service.connectionClosed(connection)
             }
         }
     }

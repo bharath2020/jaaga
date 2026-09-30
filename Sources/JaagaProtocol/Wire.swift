@@ -53,17 +53,22 @@ public struct LineFramer: Sendable {
     }
 
     /// Appends `chunk` and returns every complete frame it finished. Empty lines are dropped.
+    ///
+    /// Only `chunk` is searched for newlines — the held-back tail is known to have none — so a
+    /// frame of many megabytes costs one pass over its bytes, not one per chunk it arrived in.
     public mutating func push(_ chunk: Data) throws -> [Data] {
-        buffer.append(chunk)
         var frames: [Data] = []
+        var rest = chunk[...]
 
-        while let newline = buffer.firstIndex(of: 0x0A) {
-            let line = buffer[buffer.startIndex..<newline]
-            buffer.removeSubrange(buffer.startIndex...newline)
-            if !line.isEmpty {
-                frames.append(Data(line))
+        while let newline = rest.firstIndex(of: 0x0A) {
+            buffer.append(rest[rest.startIndex..<newline])
+            if !buffer.isEmpty {
+                frames.append(buffer)
             }
+            buffer = Data()
+            rest = rest[rest.index(after: newline)...]
         }
+        buffer.append(rest)
 
         if buffer.count > maximumFrameBytes {
             let overflow = buffer.count

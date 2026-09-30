@@ -6,6 +6,9 @@ import JaagaProtocol
 /// Every client sees every event. There is no subscription filter because the event volume is small
 /// (scan progress at a few per second, growth alerts at a few per day) and a filter would be one more
 /// thing a future CLI or MCP server has to get right before it works at all.
+///
+/// A request id is only meaningful to the client that chose it, so an event raised for a request
+/// carries its `requestID` only in the copy sent to that client; everyone else gets it without one.
 public final class EventHub: @unchecked Sendable {
     private let lock = NSLock()
     private var connections: [UUID: SocketConnection] = [:]
@@ -31,16 +34,30 @@ public final class EventHub: @unchecked Sendable {
         return connections.count
     }
 
-    public func publish(_ event: Event) {
+    public func publish(_ event: Event, requestedBy owner: UUID? = nil) {
         lock.lock()
         let targets = Array(connections.values)
         // The encoder is not thread-safe, so framing happens under the same lock as the snapshot.
-        let frame = try? Wire.frame(ServerFrame.event(event), encoder: encoder)
+        let ownerFrame = try? Wire.frame(ServerFrame.event(event), encoder: encoder)
+        let othersFrame = try? Wire.frame(ServerFrame.event(Self.withoutRequestID(event)), encoder: encoder)
         lock.unlock()
 
-        guard let frame else { return }
         for connection in targets {
+            guard let frame = connection.id == owner ? ownerFrame : othersFrame else { continue }
             connection.send(frame)
+        }
+    }
+
+    private static func withoutRequestID(_ event: Event) -> Event {
+        switch event {
+        case .scanProgress(var payload):
+            payload.requestID = nil
+            return .scanProgress(payload)
+        case .scanCompleted(var payload):
+            payload.requestID = nil
+            return .scanCompleted(payload)
+        default:
+            return event
         }
     }
 }

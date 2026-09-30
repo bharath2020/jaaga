@@ -33,8 +33,11 @@ jobs:
 
       - name: Work out the version
         id: version
+        # Through the environment, never spliced into the script: a tag name is user input.
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="$TAG"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
@@ -96,8 +99,10 @@ jobs:
           open /Applications/Jaaga.app
           \`\`\`
 
-          Or right-click the app, choose **Open**, and confirm — then allow it under
-          **System Settings › Privacy & Security** if macOS asks.
+          Or, without a terminal: try to open the app once and dismiss the warning, then go to
+          **System Settings › Privacy & Security**, scroll to the message about Jaaga, click
+          **Open Anyway**, and confirm. (On macOS 15, right-click › Open no longer gets past
+          Gatekeeper.)
 
           Because the app is not signed, registering the background daemon as a LaunchAgent may be
           refused; Jaaga falls back to running the daemon itself and says so in the window. See the

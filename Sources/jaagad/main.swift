@@ -4,7 +4,7 @@ import JaagaProtocol
 
 // The Jaaga daemon. Normally started as a per-user LaunchAgent that the app registers with
 // SMAppService; it can also be run straight from a terminal during development, which is what the
-// README's fallback describes.
+// fallback in docs/development.md describes.
 //
 // Everything interesting lives in JaagaDaemon; this is only the process wrapper: parse a couple of
 // flags, bring the server up, and keep a run loop alive so AppKit's Finder reveal and the FSEvents
@@ -96,6 +96,11 @@ Task {
         FileHandle.standardError.write(
             Data("jaagad \(JaagaDaemonVersion.current) listening on \(daemon.socketPath)\n".utf8)
         )
+    } catch UnixSocketServer.StartError.alreadyRunning(let path) {
+        // Not a failure: a daemon is serving this user already. Exiting non-zero would have launchd's
+        // KeepAlive respawn this one every few seconds for as long as the other runs.
+        FileHandle.standardError.write(Data("jaagad: another daemon is already listening on \(path)\n".utf8))
+        exit(0)
     } catch {
         fail("could not listen on \(configuration.paths.socketPath): \(error)")
     }

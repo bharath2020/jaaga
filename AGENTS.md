@@ -10,8 +10,9 @@ app that only renders what the daemon reports. A CLI and an MCP server are plann
 of the same socket protocol, so **keep the daemon's interface client-agnostic** — nothing in
 `JaagaProtocol` or `JaagaDaemon` should assume the client is the app.
 
-`README.md` covers building and running. `docs/protocol.md` is the protocol contract and is the thing
-to update whenever the wire format changes.
+`README.md` covers building and running; `docs/development.md` has the architecture and dev-loop
+detail. `docs/protocol.md` is the protocol contract and is the thing to update whenever the wire format
+changes.
 
 ## Architecture rules worth not breaking
 

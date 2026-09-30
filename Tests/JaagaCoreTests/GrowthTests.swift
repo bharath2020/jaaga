@@ -81,6 +81,20 @@ struct GrowthAnalyzerTests {
         #expect(summary.accelerationFactor == nil, "dividing by a flat baseline would be meaningless")
     }
 
+    @Test("A folder starred days ago has no baseline yet, so fast growth is not called unusual")
+    func newlyWatchedFolderDoesNotAlert() {
+        let justStarred = [
+            SizeSample(at: now.addingTimeInterval(-3 * 86_400), bytes: 10 * gigabyte),
+            SizeSample(at: now.addingTimeInterval(-2 * 86_400), bytes: 11 * gigabyte),
+            SizeSample(at: now, bytes: 13 * gigabyte),
+        ]
+
+        let summary = GrowthAnalyzer.default.summarize(samples: justStarred, now: now)
+
+        #expect(!summary.isAlerting, "there is no earlier pace for this to be faster than")
+        #expect(summary.recentBytesPerDay > 0, "the growth itself is still reported")
+    }
+
     @Test("A tiny folder with a lopsided ratio does not alert")
     func ignoresTrivialGrowth() {
         // 1 KB in the baseline, 40 KB recently: a 40× ratio over nothing at all.
@@ -245,5 +259,11 @@ struct WatchStoreTests {
         // And it can still be written to afterwards.
         try await store.watch(path: "/tmp/fresh", currentBytes: 5)
         #expect(await store.isWatched("/tmp/fresh"))
+
+        // Without losing what was there: history a later version wrote must survive the next save.
+        let kept = try FileManager.default.contentsOfDirectory(at: tree.root, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent != "watched.json" }
+            .compactMap { try? Data(contentsOf: $0) }
+        #expect(kept.contains(Data("this is not json".utf8)), "the unreadable file was overwritten")
     }
 }

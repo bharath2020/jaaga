@@ -3,14 +3,23 @@ import JaagaProtocol
 
 /// One client connected over the socket.
 ///
-/// Reads happen on the connection's own thread; writes may come from anywhere (a response from a
-/// request handler, an event from the watcher) so they are serialised behind a lock.
+/// Reads happen on the connection's own thread. Writes may come from anywhere (a response from a
+/// request handler, an event from a scan thread) and never block their caller: they are queued and
+/// written in order on the connection's own writer queue, so one client that stops reading can only
+/// ever stall itself, never a scan or the other clients.
 public final class SocketConnection: @unchecked Sendable, Identifiable, Hashable {
     public let id = UUID()
 
+    /// Queued output a client may leave unread before it is dropped as stuck.
+    static let maximumQueuedBytes = 64 * 1024 * 1024
+    /// How long one write may wait on a full socket buffer before the client is dropped as stuck.
+    static let writeTimeoutSeconds = 30
+
     private let descriptor: Int32
     private let writeLock = NSLock()
+    private let writer = DispatchQueue(label: "com.jaaga.connection.writer")
     private var closed = false
+    private var queuedBytes = 0
 
     /// Set before the read loop starts.
     var onFrame: (@Sendable (SocketConnection, Data) -> Void)?
@@ -18,20 +27,45 @@ public final class SocketConnection: @unchecked Sendable, Identifiable, Hashable
 
     init(descriptor: Int32) {
         self.descriptor = descriptor
+        var timeout = timeval(tv_sec: Self.writeTimeoutSeconds, tv_usec: 0)
+        setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var on: Int32 = 1
+        setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
     }
 
-    /// Sends one already-framed message. A failed write closes the connection: a client that has
-    /// gone away should not keep the daemon writing into a dead socket.
+    /// Queues one already-framed message and returns at once. A failed or timed-out write, or a
+    /// backlog past `maximumQueuedBytes`, closes the connection: a client that has gone away or
+    /// stopped reading should not keep the daemon holding its output.
     public func send(_ data: Data) {
         writeLock.lock()
         defer { writeLock.unlock() }
         guard !closed else { return }
+        guard queuedBytes + data.count <= Self.maximumQueuedBytes else {
+            closeLocked()
+            return
+        }
+        queuedBytes += data.count
+        writer.async { [self] in
+            let complete = write(data)
+            writeLock.lock()
+            defer { writeLock.unlock() }
+            queuedBytes -= data.count
+            if !complete { closeLocked() }
+        }
+    }
+
+    /// Writes all of `data` on the writer queue, or reports that the peer is gone or stuck.
+    private func write(_ data: Data) -> Bool {
+        writeLock.lock()
+        let isClosed = closed
+        writeLock.unlock()
+        guard !isClosed else { return false }
 
         var sent = 0
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             while sent < raw.count {
-                let written = write(descriptor, base.advanced(by: sent), raw.count - sent)
+                let written = Darwin.write(descriptor, base.advanced(by: sent), raw.count - sent)
                 if written > 0 {
                     sent += written
                     continue
@@ -40,9 +74,7 @@ public final class SocketConnection: @unchecked Sendable, Identifiable, Hashable
                 break
             }
         }
-        if sent < data.count {
-            closeLocked()
-        }
+        return sent == data.count
     }
 
     public func close() {
@@ -83,10 +115,14 @@ public final class SocketConnection: @unchecked Sendable, Identifiable, Hashable
             break
         }
 
-        writeLock.lock()
-        closed = true
-        writeLock.unlock()
-        Darwin.close(descriptor)
+        // Closed behind whatever is already queued — the framing failure above included — so the
+        // descriptor number is never reused under a write still in flight.
+        writer.async { [self] in
+            writeLock.lock()
+            closed = true
+            writeLock.unlock()
+            Darwin.close(descriptor)
+        }
         onClose?(self)
     }
 
@@ -221,8 +257,12 @@ public final class UnixSocketServer: @unchecked Sendable {
         while isRunning {
             let descriptor = accept(listenDescriptor, nil, nil)
             guard descriptor >= 0 else {
-                if errno == EINTR { continue }
-                break
+                // A failed accept is about that one connection, or a momentary shortage of
+                // descriptors; only `stop` ends the loop, or the daemon would stay up but unreachable.
+                let code = errno
+                if code == ECONNABORTED || code == EINTR { continue }
+                if isRunning { Thread.sleep(forTimeInterval: 0.1) }
+                continue
             }
             guard isRunning else {
                 Darwin.close(descriptor)

@@ -64,14 +64,18 @@ public enum ScanError: Error, Sendable, Equatable {
 /// - **Allocated, not logical.** Sizes come from `st_blocks * 512`, so a sparse file costs what it
 ///   really costs and a pile of tiny files costs its block overhead. This is the number that
 ///   changes the free-space figure when you delete something.
-/// - **One volume.** A child on a different device is skipped rather than folded into the parent's
-///   total, so a mounted disk image never inflates your home folder.
+/// - **One volume.** A child on a different device, or a mount point of its own, is skipped rather
+///   than folded into the parent's total, so a mounted disk image never inflates your home folder.
 /// - **Symlinks are never followed.** A link contributes only its own (tiny) size. Nothing is
 ///   counted twice and there are no traversal cycles.
 /// - **Hard links are counted once.** Two names for the same inode occupy one set of blocks, so the
 ///   second name adds nothing — which is what the Finder's free-space figure will also say.
+/// - **A directory is walked once.** A second path to a directory already walked — the firmlinks
+///   that join `/Users` to `/System/Volumes/Data/Users` on the startup disk — adds nothing, or the
+///   startup disk would be counted twice.
 /// - **Unreadable folders are reported.** A folder that cannot be opened goes into `unreadable`
-///   with its errno, so a total that is short says so instead of quietly lying.
+///   with its errno, so a total that is short says so instead of quietly lying. Every retained
+///   record carries the unreadable paths of its own subtree, not only the scan root's.
 ///
 /// The scan is cancellable through normal task cancellation and reports progress as it goes.
 public struct DiskScanner: Sendable {
@@ -114,12 +118,10 @@ public struct DiskScanner: Sendable {
 
         let aggregate = try run.walk(directoryPath: root, depth: 0, statOfDirectory: rootStat)
 
-        guard var rootRecord = run.records[root] else {
+        guard let rootRecord = run.records[root] else {
             // `walk` only fails to leave a record when it could not open the root at all.
             throw ScanError.notReadable(path: root, errnoCode: run.rootErrno ?? EACCES)
         }
-        rootRecord.unreadable = run.unreadable
-        run.records[root] = rootRecord
 
         return ScanOutcome(
             root: rootRecord,
@@ -152,7 +154,7 @@ private struct ScanRun {
         }
     }
 
-    /// Identifies a file across the volumes we might touch, for hard-link de-duplication.
+    /// Identifies a file or directory across the volumes we might touch, for de-duplication.
     struct INode: Hashable {
         var device: dev_t
         var inode: ino_t
@@ -168,7 +170,7 @@ private struct ScanRun {
     var unreadable: [UnreadablePath] = []
     /// Only populated when the scan root itself could not be opened.
     var rootErrno: Int32?
-    /// Inodes already counted, tracked only for files with more than one link.
+    /// Inodes already counted: every directory, and files with more than one link.
     var countedINodes: Set<INode> = []
     var itemsScanned = 0
     var bytesScanned: Int64 = 0
@@ -176,6 +178,8 @@ private struct ScanRun {
 
     mutating func walk(directoryPath: String, depth: Int, statOfDirectory: stat) throws -> Aggregate {
         if isCancelled() { throw CancellationError() }
+        countedINodes.insert(INode(device: statOfDirectory.st_dev, inode: statOfDirectory.st_ino))
+        let firstUnreadable = unreadable.count
 
         // O_NOFOLLOW: refuse to descend even if this component turned into a symlink since we
         // stat'd it. O_DIRECTORY: refuse if it is no longer a directory.
@@ -248,6 +252,12 @@ private struct ScanRun {
             }
 
             if mode == S_IFDIR {
+                // Another path to a directory already walked, like a firmlink: its blocks are
+                // already in the total.
+                if countedINodes.contains(INode(device: childStat.st_dev, inode: childStat.st_ino)) { continue }
+                // `/System/Volumes/Data` shares the startup disk's device number but is the Data
+                // volume's own mount point; `/Users` and the other firmlinks already reach it.
+                if isMountPoint(childPath) { continue }
                 let subtree = try walk(directoryPath: childPath, depth: depth + 1, statOfDirectory: childStat)
                 // The directory's own inode takes blocks too.
                 let directoryBytes = subtree.bytes + ownBytes
@@ -318,7 +328,7 @@ private struct ScanRun {
                 created: date(statOfDirectory.st_birthtimespec),
                 contentModified: date(statOfDirectory.st_mtimespec),
                 lastOpened: date(statOfDirectory.st_atimespec),
-                unreadable: [],
+                unreadable: Array(unreadable[firstUnreadable...]),
                 scannedAt: startedAt
             )
         } else {
@@ -362,6 +372,15 @@ extension Date {
 }
 
 func date(_ spec: timespec) -> Date? { Date(timespec: spec) }
+
+private func isMountPoint(_ path: String) -> Bool {
+    var info = statfs()
+    guard statfs(path, &info) == 0 else { return false }
+    let mountedOn = withUnsafeBytes(of: &info.f_mntonname) { buffer in
+        String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self)
+    }
+    return mountedOn == path
+}
 
 /// The last path component, or `/` for the volume root.
 func displayName(of path: String) -> String {

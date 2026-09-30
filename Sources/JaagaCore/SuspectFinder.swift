@@ -33,10 +33,11 @@ public struct SuspectFinder: Sendable {
 
     /// Resolves every rule against `root` (normally the user's home folder).
     ///
-    /// Rules that match nothing are dropped, so a Mac without Docker never shows a Docker row.
+    /// Rules that match nothing are dropped, so a Mac without Docker never shows a Docker row. A path
+    /// inside a folder another rule already matched is left to that rule, so no byte is counted twice.
     public func discover(root: String, now: Date = Date()) -> [SuspectMatchResult] {
         let base = (root as NSString).standardizingPath
-        return catalog.rules.compactMap { rule in
+        let matches: [SuspectMatchResult] = catalog.rules.compactMap { rule in
             switch rule.match {
             case .path(let relative):
                 let absolute = Classifier.absolute(relative, home: base)
@@ -48,8 +49,9 @@ public struct SuspectFinder: Sendable {
                     pathsAreDirectories: isDirectory
                 )
 
-            case .directoryName(let name, let roots, let maxDepth):
+            case .directoryName(let name, let roots, let maxDepth, let manifests):
                 let found = findDirectories(named: name, under: roots, base: base, maxDepth: maxDepth)
+                    .filter { manifests.isEmpty || Classifier.isInProject($0, manifests: manifests) }
                 guard !found.isEmpty else { return nil }
                 return SuspectMatchResult(
                     rule: rule,
@@ -75,6 +77,22 @@ public struct SuspectFinder: Sendable {
                 )
             }
         }
+        return withoutOverlaps(matches)
+    }
+
+    private func withoutOverlaps(_ matches: [SuspectMatchResult]) -> [SuspectMatchResult] {
+        matches.enumerated().compactMap { index, match in
+            let covered: (String) -> Bool = { path in
+                matches.enumerated().contains { otherIndex, other in
+                    otherIndex != index && other.pathsAreDirectories && other.paths.contains { folder in
+                        path.hasPrefix(folder + "/") || (path == folder && otherIndex < index)
+                    }
+                }
+            }
+            var trimmed = match
+            trimmed.paths = match.paths.filter { !covered($0) }
+            return trimmed.paths.isEmpty ? nil : trimmed
+        }
     }
 
     /// `nil` when nothing is there; otherwise whether it is a directory. Never follows a symlink,
@@ -90,12 +108,21 @@ public struct SuspectFinder: Sendable {
     /// Breadth-first search for directories with a given name, not descending into ones it finds.
     ///
     /// Not descending matters: a `node_modules` containing a nested `node_modules` should be counted
-    /// once, by its outermost folder, or the total would double-count.
+    /// once, by its outermost folder, or the total would double-count. Directories are also visited
+    /// once by identity, so `Code` and `code` — one folder on a case-insensitive volume — are not
+    /// both searched.
     private func findDirectories(named name: String, under roots: [String], base: String, maxDepth: Int) -> [String] {
         var found: [String] = []
+        var visited: Set<[UInt64]> = []
+        func firstVisit(_ path: String) -> Bool {
+            var info = stat()
+            guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else { return false }
+            return visited.insert([UInt64(bitPattern: Int64(info.st_dev)), UInt64(info.st_ino)]).inserted
+        }
+
         var queue: [(path: String, depth: Int)] = roots.compactMap { relative in
             let absolute = Classifier.absolute(relative, home: base)
-            return kind(of: absolute) == true ? (absolute, 0) : nil
+            return firstVisit(absolute) ? (absolute, 0) : nil
         }
 
         while let (path, depth) = queue.first {
@@ -105,7 +132,7 @@ public struct SuspectFinder: Sendable {
 
             for entry in names {
                 let childPath = (path as NSString).appendingPathComponent(entry)
-                guard kind(of: childPath) == true else { continue }
+                guard firstVisit(childPath) else { continue }
                 if entry == name {
                     found.append(childPath)
                 } else if depth < maxDepth {

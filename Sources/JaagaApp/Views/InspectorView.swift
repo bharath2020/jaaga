@@ -8,7 +8,10 @@ import SwiftUI
 /// re-word them: "safe to clear" has to mean the same thing everywhere it appears.
 struct InspectorView: View {
     @Environment(AppModel.self) private var model
-    @State private var isConfirmingTrash = false
+    /// The entry the confirmation was opened for, captured then. The dialog's title, its message and
+    /// its button all read this, never the live selection, which a background reload can change while
+    /// the dialog is up.
+    @State private var pendingTrash: Entry?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -49,20 +52,20 @@ struct InspectorView: View {
             Rectangle().fill(Theme.divider).frame(width: 1)
         }
         .confirmationDialog(
-            "Move “\(model.selection?.name ?? "")” to the Trash?",
-            isPresented: $isConfirmingTrash,
-            titleVisibility: .visible
-        ) {
+            "Move “\(pendingTrash?.name ?? "")” to the Trash?",
+            isPresented: Binding(
+                get: { pendingTrash != nil },
+                set: { if !$0 { pendingTrash = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingTrash
+        ) { entry in
             Button("Move to Trash", role: .destructive) {
-                if let path = model.selection?.path {
-                    Task { await model.moveToTrash(path: path) }
-                }
+                Task { await model.moveToTrash(entry) }
             }
             Button("Cancel", role: .cancel) {}
-        } message: {
-            if let entry = model.selection {
-                Text(trashExplanation(entry))
-            }
+        } message: { entry in
+            Text(trashExplanation(entry))
         }
     }
 
@@ -298,7 +301,7 @@ struct InspectorView: View {
                 .buttonStyle(.plain)
 
                 Button {
-                    isConfirmingTrash = true
+                    pendingTrash = entry
                 } label: {
                     HStack(spacing: 7) {
                         Image(systemName: "trash").font(.system(size: 13, weight: .medium))

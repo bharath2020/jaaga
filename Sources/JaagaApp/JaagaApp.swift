@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Jaaga's window.
@@ -8,13 +9,19 @@ import SwiftUI
 @main
 struct JaagaApp: App {
     @State private var model = AppModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
         Window("Jaaga", id: "jaaga-main") {
             RootView()
                 .environment(model)
                 .preferredColorScheme(.light)
-                .task { await model.connect() }
+                .task {
+                    // Quitting does not take the window through onDisappear, so the daemon this app
+                    // started would outlive it without this.
+                    appDelegate.onTerminate = { [model] in model.shutDown() }
+                    await model.connect()
+                }
                 .onDisappear { model.shutDown() }
         }
         .defaultSize(width: Theme.windowSize.width, height: Theme.windowSize.height)
@@ -34,5 +41,13 @@ struct JaagaApp: App {
                     .keyboardShortcut(.upArrow, modifiers: .command)
             }
         }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    var onTerminate: (@MainActor () -> Void)?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated { onTerminate?() }
     }
 }

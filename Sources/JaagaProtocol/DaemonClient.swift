@@ -115,8 +115,8 @@ public actor DaemonClient {
 
     /// Sends a request and waits for its answer.
     ///
-    /// Cancelling the calling task sends `cancel` to the daemon, so an abandoned scan actually stops
-    /// rather than running on in the background.
+    /// Cancelling the calling task, or running out of `timeout`, sends `cancel` to the daemon, so an
+    /// abandoned scan actually stops rather than running on in the background.
     public func send(_ request: Request) async throws -> Response {
         guard let transport else { throw ClientError.notConnected }
 
@@ -124,23 +124,18 @@ public actor DaemonClient {
         let id = String(nextRequestNumber)
         let frame = try Wire.frame(RequestFrame(id: id, request: request))
 
+        let timer = Task { [timeout, weak self] in
+            try await Task.sleep(for: timeout)
+            await self?.abandon(id: id, because: ClientError.timedOut(method: request.method.rawValue))
+        }
+        defer { timer.cancel() }
+
         return try await withTaskCancellationHandler {
-            try await withThrowingTaskGroup(of: Response.self) { group in
-                group.addTask { [timeout] in
-                    try await Task.sleep(for: timeout)
-                    throw ClientError.timedOut(method: request.method.rawValue)
-                }
-                group.addTask {
-                    try await self.awaitResponse(id: id) {
-                        transport.send(frame)
-                    }
-                }
-                let result = try await group.next()!
-                group.cancelAll()
-                return result
+            try await awaitResponse(id: id) {
+                transport.send(frame)
             }
         } onCancel: {
-            Task { await self.abandon(id: id) }
+            Task { await self.abandon(id: id, because: CancellationError()) }
         }
     }
 
@@ -155,11 +150,11 @@ public actor DaemonClient {
         }
     }
 
-    /// Tells the daemon to stop working on a request nobody is waiting for any more.
-    private func abandon(id: String) {
-        if let continuation = pending.removeValue(forKey: id) {
-            continuation.resume(throwing: CancellationError())
-        }
+    /// Fails the wait for `id` with `error` and tells the daemon to stop working on a request nobody
+    /// is waiting for any more.
+    private func abandon(id: String, because error: any Error) {
+        guard let continuation = pending.removeValue(forKey: id) else { return }
+        continuation.resume(throwing: error)
         guard let transport else { return }
         nextRequestNumber += 1
         let frame = try? Wire.frame(
@@ -300,12 +295,17 @@ private final class Transport: @unchecked Sendable {
             throw DaemonClient.ClientError.connectionFailed(path: socketPath, errnoCode: code)
         }
 
+        // A daemon that has gone away must fail a write, not kill the app with SIGPIPE.
+        var on: Int32 = 1
+        setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         self.descriptor = descriptor
     }
 
     func start(onFrame: @escaping @Sendable (Data) -> Void, onClose: @escaping @Sendable () -> Void) {
-        let thread = Thread { [descriptor] in
-            var framer = LineFramer()
+        let thread = Thread { [self, descriptor] in
+            // Responses are bounded by the filesystem, not by a request, so a folder with tens of
+            // thousands of children must not trip the limit meant for requests to the daemon.
+            var framer = LineFramer(maximumFrameBytes: .max)
             var buffer = [UInt8](repeating: 0, count: 64 * 1024)
             while true {
                 let count = read(descriptor, &buffer, buffer.count)
@@ -318,7 +318,7 @@ private final class Transport: @unchecked Sendable {
                 if errno == EINTR { continue }
                 break
             }
-            Darwin.close(descriptor)
+            closeDescriptor()
             onClose()
         }
         thread.name = "com.jaaga.client"
@@ -351,5 +351,14 @@ private final class Transport: @unchecked Sendable {
         guard !closed else { return }
         closed = true
         shutdown(descriptor, SHUT_RDWR)
+    }
+
+    /// Marks the transport closed under the write lock before releasing the descriptor, so a send
+    /// racing the reader's exit can never write to a descriptor number the process has reused.
+    private func closeDescriptor() {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        closed = true
+        Darwin.close(descriptor)
     }
 }

@@ -264,7 +264,7 @@ private struct ConnectionFailedOverlay: View {
             .padding(12)
             .background(Theme.tilePanel, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-            Text("The README's “Running it” section covers both the LaunchAgent and the development fallback.")
+            Text("docs/development.md covers both the LaunchAgent and the development fallback.")
                 .font(Theme.text(12))
                 .foregroundStyle(Theme.secondaryInk)
                 .multilineTextAlignment(.center)

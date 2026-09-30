@@ -11,7 +11,9 @@ struct SpaceMapView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if let listing = model.listing {
+        // While another folder is being measured, the previous folder's numbers would read as that
+        // folder's; the placeholder stands in until the real ones arrive.
+        if let listing = model.listing, model.measuringPath == nil {
             VStack(alignment: .leading, spacing: 16) {
                 header(listing)
                 hint
@@ -370,7 +372,7 @@ private struct FirstScanPlaceholder: View {
     var body: some View {
         VStack(spacing: 10) {
             ProgressView().controlSize(.large)
-            Text("Measuring your folders")
+            Text(model.measuringPath.map { "Measuring \(displayName($0))" } ?? "Measuring your folders")
                 .font(Theme.text(15, weight: .bold))
             if let progress = model.scanProgress {
                 Text("\(Present.itemCount(progress.itemsScanned)) so far · \(Present.size(progress.bytesScanned))")
@@ -401,6 +403,10 @@ private struct FirstScanPlaceholder: View {
     private func abbreviated(_ path: String) -> String {
         guard path.hasPrefix(model.homePath) else { return path }
         return "~" + path.dropFirst(model.homePath.count)
+    }
+
+    private func displayName(_ path: String) -> String {
+        path == model.homePath ? "Home" : (path as NSString).lastPathComponent
     }
 }
 

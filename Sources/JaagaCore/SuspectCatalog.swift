@@ -5,9 +5,10 @@ import JaagaProtocol
 public enum SuspectMatch: Sendable, Hashable {
     /// Exactly one path, relative to the scan root (or absolute if it starts with `/`).
     case path(String)
-    /// Directories with a given name, found under any of `roots` down to `maxDepth`.
+    /// Directories with a given name, found under any of `roots` down to `maxDepth`, and only where
+    /// one of `manifests` sits beside them when any are listed.
     /// This is how `node_modules` across a projects folder is caught.
-    case directoryName(String, roots: [String], maxDepth: Int)
+    case directoryName(String, roots: [String], maxDepth: Int, manifests: [String])
     /// Files with any of `extensions` directly inside `root`, optionally only ones untouched for a
     /// while. This is how old installers in Downloads are caught.
     case filesWithExtensions([String], root: String, minimumAgeDays: Int?)
@@ -68,6 +69,7 @@ public struct SuspectCatalog: Sendable, Hashable {
     public enum LoadError: Error, Sendable, Equatable, CustomStringConvertible {
         case resourceMissing(searched: [String])
         case unsupportedVersion(Int)
+        case invalidRule(id: String, missing: String)
 
         public var description: String {
             switch self {
@@ -77,6 +79,8 @@ public struct SuspectCatalog: Sendable, Hashable {
             case .unsupportedVersion(let version):
                 return "suspects.json declares version \(version); this build understands "
                     + "\(SuspectCatalog.supportedVersion)."
+            case .invalidRule(let id, let missing):
+                return "suspects.json rule '\(id)' has no \(missing), so it would match the wrong thing."
             }
         }
     }
@@ -99,7 +103,7 @@ public struct SuspectCatalog: Sendable, Hashable {
         guard document.version == supportedVersion else {
             throw LoadError.unsupportedVersion(document.version)
         }
-        return SuspectCatalog(version: document.version, rules: document.rules.map(\.rule))
+        return SuspectCatalog(version: document.version, rules: try document.rules.map { try $0.rule() })
     }
 
     /// The shipped catalog, with any rules from `overrideURL` appended. A rule there with the same
@@ -140,18 +144,33 @@ private struct RuleDocument: Decodable {
     var aggregate: Bool?
     var match: MatchDocument
 
-    var rule: SuspectRule {
-        SuspectRule(
+    func rule() throws -> SuspectRule {
+        let resolved = try match.resolved(ruleID: id)
+        return SuspectRule(
             id: id,
             title: title,
             kind: kind,
             category: category,
-            verdict: verdict,
+            verdict: Self.capped(verdict, for: resolved),
             reason: reason,
             displayPath: displayPath,
-            match: match.resolved,
+            match: resolved,
             isAggregate: aggregate ?? false
         )
+    }
+
+    /// A name or an extension alone never earns "safe to clear": only a named path, or a name
+    /// beside the manifest that regenerates it, is specific enough.
+    private static func capped(_ verdict: Verdict, for match: SuspectMatch) -> Verdict {
+        guard verdict == .safeToClear else { return verdict }
+        switch match {
+        case .path:
+            return verdict
+        case .directoryName(_, _, _, let manifests):
+            return manifests.isEmpty ? .reviewFirst : verdict
+        case .filesWithExtensions:
+            return .reviewFirst
+        }
     }
 }
 
@@ -170,15 +189,37 @@ private struct MatchDocument: Decodable {
     var root: String?
     var extensions: [String]?
     var minimumAgeDays: Int?
+    var manifests: [String]?
 
-    var resolved: SuspectMatch {
+    /// Refuses a rule missing what locates it: an empty path resolves to the home folder itself,
+    /// which would hand the whole of home that rule's verdict.
+    func resolved(ruleID: String) throws -> SuspectMatch {
+        func required(_ value: String?, _ field: String) throws -> String {
+            guard let value, !value.isEmpty else { throw SuspectCatalog.LoadError.invalidRule(id: ruleID, missing: field) }
+            return value
+        }
+        func required(_ value: [String]?, _ field: String) throws -> [String] {
+            guard let value, !value.isEmpty, !value.contains(where: \.isEmpty) else {
+                throw SuspectCatalog.LoadError.invalidRule(id: ruleID, missing: field)
+            }
+            return value
+        }
         switch type {
         case .path:
-            .path(path ?? "")
+            return .path(try required(path, "match.path"))
         case .directoryName:
-            .directoryName(name ?? "", roots: roots ?? [], maxDepth: maxDepth ?? 3)
+            return .directoryName(
+                try required(name, "match.name"),
+                roots: try required(roots, "match.roots"),
+                maxDepth: maxDepth ?? 3,
+                manifests: manifests ?? []
+            )
         case .filesWithExtensions:
-            .filesWithExtensions(extensions ?? [], root: root ?? "", minimumAgeDays: minimumAgeDays)
+            return .filesWithExtensions(
+                try required(extensions, "match.extensions"),
+                root: try required(root, "match.root"),
+                minimumAgeDays: minimumAgeDays
+            )
         }
     }
 }

@@ -27,7 +27,9 @@ public struct Classification: Sendable, Hashable {
 /// 3. Where it lives — `~/Movies` is media, `~/Downloads` is downloads, `~/Library` is cache.
 ///
 /// The default verdict is `yourData`. Jaaga only upgrades to "safe to clear" when it recognises
-/// something specific, because the cost of being wrong in that direction is somebody's work.
+/// something specific, because the cost of being wrong in that direction is somebody's work. A name
+/// alone is never specific enough: `build` or `node_modules` is safe to clear only beside the
+/// manifest that regenerates it, and never inside an app bundle or an app's own data.
 public struct Classifier: Sendable {
     public let home: String
     public let catalog: SuspectCatalog
@@ -36,6 +38,8 @@ public struct Classifier: Sendable {
     private let rulesByPath: [String: SuspectRule]
     /// Rules that match on a directory name, e.g. `node_modules`.
     private let rulesByDirectoryName: [String: SuspectRule]
+    /// Rules that match files by extension in one folder, e.g. installers in Downloads.
+    private let fileRules: [(folder: String, extensions: Set<String>, rule: SuspectRule)]
 
     public init(home: String, catalog: SuspectCatalog) {
         self.home = (home as NSString).standardizingPath
@@ -43,23 +47,26 @@ public struct Classifier: Sendable {
 
         var byPath: [String: SuspectRule] = [:]
         var byName: [String: SuspectRule] = [:]
+        var files: [(folder: String, extensions: Set<String>, rule: SuspectRule)] = []
         for rule in catalog.rules {
             switch rule.match {
             case .path(let relative):
                 byPath[Classifier.absolute(relative, home: self.home)] = rule
-            case .directoryName(let name, _, _):
+            case .directoryName(let name, _, _, _):
                 byName[name] = rule
-            case .filesWithExtensions:
-                break
+            case .filesWithExtensions(let extensions, let root, _):
+                files.append((Classifier.absolute(root, home: self.home), Set(extensions.map { $0.lowercased() }), rule))
             }
         }
         self.rulesByPath = byPath
         self.rulesByDirectoryName = byName
+        self.fileRules = files
     }
 
     static func absolute(_ path: String, home: String) -> String {
         if path.hasPrefix("/") { return (path as NSString).standardizingPath }
-        if path.hasPrefix("~") { return (path as NSString).expandingTildeInPath }
+        if path == "~" { return home }
+        if path.hasPrefix("~/") { return (home as NSString).appendingPathComponent(String(path.dropFirst(2))) }
         return (home as NSString).appendingPathComponent(path)
     }
 
@@ -77,13 +84,31 @@ public struct Classifier: Sendable {
             )
         }
 
-        if isDirectory, let rule = rulesByDirectoryName[name] {
+        if isDirectory, let rule = rulesByDirectoryName[name], case .directoryName(_, _, _, let manifests) = rule.match {
+            return Self.byName(
+                Classification(
+                    category: rule.category,
+                    verdict: rule.verdict,
+                    reason: rule.reason(matchCount: 1),
+                    kind: rule.kind,
+                    ruleID: rule.id
+                ),
+                path: standardized,
+                manifests: manifests
+            )
+        }
+
+        if !isDirectory,
+           let match = fileRules.first(where: {
+               $0.folder == (standardized as NSString).deletingLastPathComponent
+                   && $0.extensions.contains((name as NSString).pathExtension.lowercased())
+           }) {
             return Classification(
-                category: rule.category,
-                verdict: rule.verdict,
-                reason: rule.reason,
-                kind: rule.kind,
-                ruleID: rule.id
+                category: match.rule.category,
+                verdict: match.rule.verdict,
+                reason: match.rule.reason(matchCount: 1),
+                kind: match.rule.kind,
+                ruleID: match.rule.id
             )
         }
 
@@ -100,8 +125,8 @@ public struct Classifier: Sendable {
             )
         }
 
-        if let known = Self.knownFolders[name] {
-            return known
+        if isDirectory, let known = Self.knownFolders[name] {
+            return Self.byName(known.classification, path: standardized, manifests: known.manifests)
         }
 
         return locationBased(standardized, name: name, isDirectory: isDirectory)
@@ -118,69 +143,126 @@ public struct Classifier: Sendable {
         return nil
     }
 
-    /// Folder names that mean the same thing wherever they turn up.
-    private static let knownFolders: [String: Classification] = [
-        "node_modules": Classification(
-            category: .dev,
-            verdict: .safeToClear,
-            reason: "Dependencies npm install brings back in seconds. Nothing you wrote lives in here.",
-            kind: "Dependencies"
+    /// Folder names that mean the same thing wherever they turn up, and the manifests that must sit
+    /// beside one for it to be the regenerable thing the name suggests.
+    private static let knownFolders: [String: (classification: Classification, manifests: [String])] = [
+        "node_modules": (
+            Classification(
+                category: .dev,
+                verdict: .safeToClear,
+                reason: "Dependencies npm install brings back in seconds. Nothing you wrote lives in here.",
+                kind: "Dependencies"
+            ),
+            ["package.json"]
         ),
-        "DerivedData": Classification(
-            category: .dev,
-            verdict: .safeToClear,
-            reason: "Xcode rebuilds this the next time you build.",
-            kind: "Xcode build cache"
+        "DerivedData": (
+            Classification(
+                category: .dev,
+                verdict: .safeToClear,
+                reason: "Xcode rebuilds this the next time you build.",
+                kind: "Xcode build cache"
+            ),
+            []
         ),
-        "Caches": Classification(
-            category: .cache,
-            verdict: .safeToClear,
-            reason: "Temporary copies apps keep so they load faster. Apps rebuild what they need.",
-            kind: "Cache folder"
+        "Caches": (
+            Classification(
+                category: .cache,
+                verdict: .safeToClear,
+                reason: "Temporary copies apps keep so they load faster. Apps rebuild what they need.",
+                kind: "Cache folder"
+            ),
+            []
         ),
-        ".build": Classification(
-            category: .dev,
-            verdict: .safeToClear,
-            reason: "Swift build output. Regenerated by the next build.",
-            kind: "Build output"
+        ".build": (
+            Classification(
+                category: .dev,
+                verdict: .safeToClear,
+                reason: "Swift build output. Regenerated by the next build.",
+                kind: "Build output"
+            ),
+            ["Package.swift"]
         ),
-        "build": Classification(
-            category: .dev,
-            verdict: .safeToClear,
-            reason: "Build output. Regenerated by the next build.",
-            kind: "Build output"
+        "build": (
+            Classification(
+                category: .dev,
+                verdict: .safeToClear,
+                reason: "Build output. Regenerated by the next build.",
+                kind: "Build output"
+            ),
+            ["package.json", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+             "CMakeLists.txt", "pyproject.toml", "setup.py"]
         ),
-        "target": Classification(
-            category: .dev,
-            verdict: .safeToClear,
-            reason: "Cargo build output. Regenerated by the next build.",
-            kind: "Build output"
+        "target": (
+            Classification(
+                category: .dev,
+                verdict: .safeToClear,
+                reason: "Cargo or Maven build output. Regenerated by the next build.",
+                kind: "Build output"
+            ),
+            ["Cargo.toml", "pom.xml", "build.sbt"]
         ),
-        "dist": Classification(
-            category: .dev,
-            verdict: .safeToClear,
-            reason: "Packaged build output. Regenerated by the next build.",
-            kind: "Build output"
+        "dist": (
+            Classification(
+                category: .dev,
+                verdict: .safeToClear,
+                reason: "Packaged build output. Regenerated by the next build.",
+                kind: "Build output"
+            ),
+            ["package.json", "pyproject.toml", "setup.py"]
         ),
-        ".venv": Classification(
-            category: .dev,
-            verdict: .safeToClear,
-            reason: "A Python virtual environment. Recreated from your requirements file.",
-            kind: "Virtual environment"
+        ".venv": (
+            Classification(
+                category: .dev,
+                verdict: .safeToClear,
+                reason: "A Python virtual environment. Recreated from your requirements file.",
+                kind: "Virtual environment"
+            ),
+            []
         ),
-        ".Trash": Classification(
-            category: .system,
-            verdict: .safeToClear,
-            reason: "Items you already chose to delete. Emptying the Trash is what frees the space.",
-            kind: "Deleted items"
+        ".Trash": (
+            Classification(
+                category: .system,
+                verdict: .safeToClear,
+                reason: "Items you already chose to delete. Emptying the Trash is what frees the space.",
+                kind: "Deleted items"
+            ),
+            []
         ),
-        ".git": Classification(
-            category: .dev,
-            verdict: .yourData,
-            reason: "Your repository's entire history. Deleting it loses every commit that is not pushed.",
-            kind: "Git repository"
+        ".git": (
+            Classification(
+                category: .dev,
+                verdict: .yourData,
+                reason: "Your repository's entire history. Deleting it loses every commit that is not pushed.",
+                kind: "Git repository"
+            ),
+            []
         ),
     ]
+
+    /// Folders that belong to an app rather than to a project, whatever they contain.
+    private static let appOwnedFolders: Set<String> = ["Application Support", "Containers", "Group Containers"]
+
+    /// A verdict earned by a folder's name: "safe to clear" only holds beside one of `manifests` and
+    /// outside anything an app owns; otherwise the name is a hint worth a look, not a licence.
+    private static func byName(_ named: Classification, path: String, manifests: [String]) -> Classification {
+        guard named.verdict == .safeToClear, !isInProject(path, manifests: manifests) else { return named }
+        var capped = named
+        capped.verdict = .reviewFirst
+        capped.reason += " Jaaga could not confirm the project it belongs to, so check before deleting."
+        return capped
+    }
+
+    static func isInProject(_ path: String, manifests: [String]) -> Bool {
+        guard !manifests.isEmpty else { return false }
+        let components = (path as NSString).pathComponents
+        if components.contains(where: { $0.hasSuffix(".app") || appOwnedFolders.contains($0) }) { return false }
+        let parent = (path as NSString).deletingLastPathComponent
+        return manifests.contains { manifest in
+            var info = stat()
+            let manifestPath = (parent as NSString).appendingPathComponent(manifest)
+            return lstat(manifestPath, &info) == 0 && (info.st_mode & S_IFMT) == S_IFREG
+        }
+    }
 
     /// The fallback: category from where it sits, verdict left at `yourData`.
     private func locationBased(_ path: String, name: String, isDirectory: Bool) -> Classification {

@@ -158,10 +158,12 @@ struct SidebarView: View {
 }
 
 extension AppModel {
-    /// The home folder's measured size, when it happens to be what is on screen or cached.
+    /// The home folder's measured size, when it happens to be what is on screen or cached. Marked as a
+    /// lower bound when part of home could not be read, which without Full Disk Access it usually is.
     var currentHomeSize: String? {
         if let folder = currentFolder, folder.path == homePath {
-            return Present.compactSize(folder.allocatedBytes)
+            let size = Present.compactSize(folder.allocatedBytes)
+            return folder.isComplete ? size : "≥ " + size
         }
         return nil
     }

@@ -85,10 +85,11 @@ struct DiskScannerTests {
         #expect(outcome.root.itemCount == 2)
     }
 
-    @Test("An unreadable folder is reported rather than silently skipped")
+    @Test(
+        "An unreadable folder is reported rather than silently skipped",
+        .disabled(if: runningAsRoot, "root can read anything, so this cannot be tested as root")
+    )
     func reportsUnreadableFolders() throws {
-        try #require(!runningAsRoot, "root can read anything, so this cannot be tested as root")
-
         let tree = try TemporaryTree()
         try tree.directory("readable")
         try tree.file("readable/ok.bin", bytes: 8_000)
@@ -314,10 +315,11 @@ struct RecursiveTotalTests {
         #expect(library.itemCount == 5, "shallow.bin, Caches, deep, deeper, big.bin")
     }
 
-    @Test("An unreadable folder is attributed to the child it sits under, not just the scan root")
+    @Test(
+        "An unreadable folder is attributed to the child it sits under, not just the scan root",
+        .disabled(if: runningAsRoot, "root can read anything")
+    )
     func unreadableSubtreesAreAttributedToTheirChild() throws {
-        try #require(!runningAsRoot, "root can read anything")
-
         let tree = try TemporaryTree()
         try tree.file("home/Library/readable.bin", bytes: 10_000)
         let locked = try tree.directory("home/Library/Locked")
@@ -340,5 +342,98 @@ struct RecursiveTotalTests {
             "Documents was measured in full and must not be tarred with Library's brush"
         )
         #expect(library.allocatedBytes < 900_000, "the locked bytes genuinely are not counted")
+    }
+
+    @Test(
+        "A retained record below the root carries the unreadable paths of its own subtree",
+        .disabled(if: runningAsRoot, "root can read anything")
+    )
+    func nestedRecordsCarryTheirUnreadablePaths() throws {
+        let tree = try TemporaryTree()
+        let locked = try tree.directory("home/Library/Mail")
+        try tree.file("home/Library/Mail/inbox.bin", bytes: 300_000)
+        try tree.file("home/Library/Preferences/p.plist", bytes: 2_000)
+        try tree.file("home/Documents/doc.bin", bytes: 5_000)
+        try tree.makeUnreadable(locked)
+
+        let outcome = try DiskScanner().scan(rootPath: tree.root.appendingPathComponent("home").path)
+
+        // What the daemon serves from cache when ~/Library is opened after a scan of ~.
+        let library = try #require(outcome.records[tree.root.appendingPathComponent("home/Library").path])
+        #expect(!library.isComplete, "Library's own total is short by Mail, so it must say so")
+        #expect(library.unreadable.map(\.path) == [locked.path])
+
+        let documents = try #require(outcome.records[tree.root.appendingPathComponent("home/Documents").path])
+        #expect(documents.isComplete, "Documents was measured in full")
+        let preferences = try #require(
+            outcome.records[tree.root.appendingPathComponent("home/Library/Preferences").path]
+        )
+        #expect(preferences.isComplete, "a readable sibling of the locked folder is complete")
+    }
+}
+
+@Suite("Directories reached twice")
+struct DuplicateDirectoryTests {
+    /// A journaled HFS+ disk image, the one filesystem on which a user can hard-link a directory —
+    /// which is the same shape as the startup disk's firmlinks: two paths, one directory.
+    private final class HFSImage {
+        let folder: URL
+        let mountPoint: URL
+
+        init() throws {
+            folder = URL(fileURLWithPath: "/tmp", isDirectory: true)
+                .appendingPathComponent("jaaga-hfs-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            mountPoint = folder.appendingPathComponent("mnt", isDirectory: true)
+            try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
+            let image = folder.appendingPathComponent("image.dmg").path
+            try Self.hdiutil(["create", "-size", "8m", "-fs", "JHFS+", "-volname", "jaaga", "-layout", "NONE", image])
+            try Self.hdiutil(["attach", "-nobrowse", "-noverify", "-mountpoint", mountPoint.path, image])
+        }
+
+        deinit {
+            try? Self.hdiutil(["detach", "-force", mountPoint.path])
+            try? FileManager.default.removeItem(at: folder)
+        }
+
+        private static func hdiutil(_ arguments: [String]) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+            process.arguments = arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "hdiutil \(arguments[0]) failed"])
+            }
+        }
+    }
+
+    @Test("A second path to a directory already walked is counted once, like a firmlink")
+    func countsADirectoryReachedTwiceOnce() throws {
+        let image = try HFSImage()
+        let real = image.mountPoint.appendingPathComponent("a/real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: image.mountPoint.appendingPathComponent("b"),
+            withIntermediateDirectories: true
+        )
+        let payload = real.appendingPathComponent("payload.bin")
+        try Data(count: 1_000_000).write(to: payload)
+        let alias = image.mountPoint.appendingPathComponent("b/alias")
+        guard link(real.path, alias.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EPERM)
+        }
+
+        let outcome = try DiskScanner().scan(rootPath: image.mountPoint.path)
+
+        var payloadStat = stat()
+        #expect(lstat(payload.path, &payloadStat) == 0)
+        let payloadBytes = Int64(payloadStat.st_blocks) * 512
+        #expect(outcome.root.allocatedBytes >= payloadBytes)
+        #expect(
+            outcome.root.allocatedBytes < payloadBytes * 2,
+            "the directory behind both paths must be charged once, not once per path"
+        )
     }
 }

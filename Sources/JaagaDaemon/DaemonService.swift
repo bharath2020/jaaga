@@ -20,15 +20,26 @@ public actor DaemonService {
     private let watchStore: WatchStore
     private let cache: ScanCache
 
+    /// Who asked: the connection a request came in on, and the id that client chose for it. Ids are
+    /// only unique per client — every client starts counting at "1" — so neither half is enough.
+    struct RequestOrigin: Hashable, Sendable {
+        var connection: UUID?
+        var id: String
+    }
+
     /// Requests still running, so `cancel` has something to cancel.
-    private var inFlight: [String: Task<Void, Never>] = [:]
+    private var inFlight: [RequestOrigin: Task<Void, Never>] = [:]
+    /// Paths invalidated while a scan or suspect report was being measured, keyed by that work. A
+    /// result measured before a change must not be cached as if it came after it.
+    private var changesDuringWork: [UUID: Set<String>] = [:]
     /// Paths currently watched, mirrored so the FSEvents stream can be kept in step.
     private var watchedPaths: Set<String> = []
     private var folderWatcher: FolderWatcher?
     private var samplingTask: Task<Void, Never>?
 
-    /// The last computed suspect report, so switching back to that view is instant.
-    private var cachedSuspectReport: SuspectReport?
+    /// The last computed suspect report and the root it was measured for, so switching back to that
+    /// view is instant.
+    private var cachedSuspectReport: (root: String, report: SuspectReport)?
 
     public init(configuration: DaemonConfiguration, eventHub: EventHub) throws {
         self.configuration = configuration
@@ -120,27 +131,41 @@ public actor DaemonService {
         // Cancellation has to be answered immediately: queueing it behind the work it is meant to
         // stop would make it useless.
         if case .cancel(let request) = frame.request {
-            let cancelled = inFlight.removeValue(forKey: request.requestID)
-            cancelled?.cancel()
-            send(.response(id: frame.id, .cancel(Acknowledgement(ok: cancelled != nil))), to: connection)
+            let cancelled = cancel(RequestOrigin(connection: connection.id, id: request.requestID))
+            send(.response(id: frame.id, .cancel(Acknowledgement(ok: cancelled))), to: connection)
             return
         }
 
+        let origin = RequestOrigin(connection: connection.id, id: frame.id)
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.perform(frame, for: connection)
-            await self.finished(requestID: frame.id)
+            await self.perform(frame, origin: origin, for: connection)
+            await self.finished(origin)
         }
-        inFlight[frame.id] = task
+        inFlight[origin] = task
     }
 
-    private func finished(requestID: String) {
-        inFlight.removeValue(forKey: requestID)
+    /// The client hung up, so nobody is waiting for its requests: stop them rather than let them hold
+    /// scan slots.
+    public func connectionClosed(_ connection: SocketConnection) {
+        for origin in inFlight.keys where origin.connection == connection.id {
+            _ = cancel(origin)
+        }
     }
 
-    private func perform(_ frame: RequestFrame, for connection: SocketConnection) async {
+    private func cancel(_ origin: RequestOrigin) -> Bool {
+        guard let task = inFlight.removeValue(forKey: origin) else { return false }
+        task.cancel()
+        return true
+    }
+
+    private func finished(_ origin: RequestOrigin) {
+        inFlight.removeValue(forKey: origin)
+    }
+
+    private func perform(_ frame: RequestFrame, origin: RequestOrigin, for connection: SocketConnection) async {
         do {
-            let response = try await respond(to: frame.request, requestID: frame.id)
+            let response = try await respond(to: frame.request, origin: origin)
             send(.response(id: frame.id, response), to: connection)
         } catch is CancellationError {
             send(
@@ -165,8 +190,13 @@ public actor DaemonService {
         }
     }
 
+    /// Answers a request that arrived without a connection, such as from a test or an in-process client.
+    public func respond(to request: Request) async throws -> Response {
+        try await respond(to: request, origin: nil)
+    }
+
     /// The whole request surface. Kept in one place so the protocol document has one thing to mirror.
-    public func respond(to request: Request, requestID: String? = nil) async throws -> Response {
+    private func respond(to request: Request, origin: RequestOrigin?) async throws -> Response {
         switch request {
         case .hello(let parameters):
             return .hello(try hello(parameters))
@@ -177,19 +207,19 @@ public actor DaemonService {
             )
 
         case .volumeSummary(let parameters):
-            return .volumeSummary(try await volumeSummary(parameters, requestID: requestID))
+            return .volumeSummary(try await volumeSummary(parameters, origin: origin))
 
         case .listFolder(let parameters):
-            return .listFolder(try await listFolder(parameters, requestID: requestID))
+            return .listFolder(try await listFolder(parameters, origin: origin))
 
         case .entry(let parameters):
-            return .entry(try await entry(at: parameters.path, requestID: requestID))
+            return .entry(try await entry(at: parameters.path, origin: origin))
 
         case .suspects(let parameters):
-            return .suspects(try await suspects(parameters, requestID: requestID))
+            return .suspects(try await suspects(parameters, origin: origin))
 
         case .watch(let parameters):
-            return .watch(try await watch(path: parameters.path, requestID: requestID))
+            return .watch(try await watch(path: parameters.path, origin: origin))
 
         case .unwatch(let parameters):
             return .unwatch(Acknowledgement(ok: try await unwatch(path: parameters.path)))
@@ -198,7 +228,7 @@ public actor DaemonService {
             return .watched(WatchedResponse(folders: try await watchedFolders()))
 
         case .quickLook(let parameters):
-            return .quickLook(try await quickLook(parameters, requestID: requestID))
+            return .quickLook(try await quickLook(parameters, origin: origin))
 
         case .reveal(let parameters):
             try reveal(path: parameters.path)
@@ -208,9 +238,7 @@ public actor DaemonService {
             return .moveToTrash(try await moveToTrash(parameters))
 
         case .cancel(let parameters):
-            let cancelled = inFlight.removeValue(forKey: parameters.requestID)
-            cancelled?.cancel()
-            return .cancel(Acknowledgement(ok: cancelled != nil))
+            return .cancel(Acknowledgement(ok: cancel(RequestOrigin(connection: origin?.connection, id: parameters.requestID))))
         }
     }
 
@@ -236,18 +264,17 @@ public actor DaemonService {
 
     // MARK: - Folders
 
-    private func listFolder(_ parameters: ListFolderRequest, requestID: String?) async throws -> FolderListing {
-        let path = Self.normalize(parameters.path)
+    private func listFolder(_ parameters: ListFolderRequest, origin: RequestOrigin?) async throws -> FolderListing {
+        let path = normalize(parameters.path)
         if parameters.refresh {
-            cache.invalidateSubtree(path)
-            cachedSuspectReport = nil
+            invalidate(path)
         }
 
         if let cached = cache.record(for: path) {
             return await listing(from: cached, fromCache: true)
         }
 
-        let record = try await measureDirectory(at: path, requestID: requestID)
+        let record = try await measureDirectory(at: path, origin: origin)
         return await listing(from: record, fromCache: false)
     }
 
@@ -271,8 +298,8 @@ public actor DaemonService {
         )
     }
 
-    private func entry(at path: String, requestID: String?) async throws -> Entry {
-        let normalized = Self.normalize(path)
+    private func entry(at path: String, origin: RequestOrigin?) async throws -> Entry {
+        let normalized = normalize(path)
 
         if let record = cache.record(for: normalized) {
             return entry(from: record, isWatched: watchedPaths.contains(normalized))
@@ -297,7 +324,7 @@ public actor DaemonService {
         }
 
         if (info.st_mode & S_IFMT) == S_IFDIR {
-            let record = try await measureDirectory(at: normalized, requestID: requestID)
+            let record = try await measureDirectory(at: normalized, origin: origin)
             return entry(from: record, isWatched: watchedPaths.contains(normalized))
         }
 
@@ -305,12 +332,16 @@ public actor DaemonService {
     }
 
     /// Measures a directory, serving from the cache when it can and scanning when it cannot.
-    private func measureDirectory(at path: String, requestID: String?) async throws -> DirectoryRecord {
+    private func measureDirectory(at path: String, origin: RequestOrigin?) async throws -> DirectoryRecord {
         if let cached = cache.record(for: path) { return cached }
 
         let scanner = self.scanner
         let hub = self.eventHub
+        let requestID = origin?.id
+        let owner = origin?.connection
         let started = Date()
+        let work = beginWork()
+        defer { changesDuringWork.removeValue(forKey: work) }
         let outcome = try await scanRunner.run { isCancelled in
             try scanner.scan(
                 rootPath: path,
@@ -324,7 +355,8 @@ public actor DaemonService {
                                 itemsScanned: progress.itemsScanned,
                                 bytesScanned: progress.bytesScanned
                             )
-                        )
+                        ),
+                        requestedBy: owner
                     )
                 },
                 isCancelled: isCancelled
@@ -332,6 +364,10 @@ public actor DaemonService {
         }
 
         cache.store(outcome.records)
+        // Anything that changed while the scan ran makes its records for those paths stale already.
+        for path in changesDuringWork[work] ?? [] {
+            cache.invalidateSubtree(path)
+        }
         eventHub.publish(
             .scanCompleted(
                 ScanCompletedEvent(
@@ -342,18 +378,38 @@ public actor DaemonService {
                     durationSeconds: Date().timeIntervalSince(started),
                     unreadableCount: outcome.unreadable.count
                 )
-            )
+            ),
+            requestedBy: owner
         )
         return outcome.root
     }
 
+    // MARK: - Invalidation
+
+    /// Starts tracking changes for one piece of measuring work.
+    private func beginWork() -> UUID {
+        let work = UUID()
+        changesDuringWork[work] = []
+        return work
+    }
+
+    /// Something under `path` changed: every cached total at or above it is stale, and so is anything
+    /// being measured right now that includes it.
+    private func invalidate(_ path: String) {
+        cache.invalidateSubtree(path)
+        cachedSuspectReport = nil
+        for work in changesDuringWork.keys {
+            changesDuringWork[work]?.insert(path)
+        }
+    }
+
     // MARK: - Volume summary
 
-    private func volumeSummary(_ parameters: VolumeSummaryRequest, requestID: String?) async throws -> VolumeSummary {
+    private func volumeSummary(_ parameters: VolumeSummaryRequest, origin: RequestOrigin?) async throws -> VolumeSummary {
         let volumes = volumeInventory.volumes()
         let volume: VolumeInfo
         if let mountPath = parameters.mountPath {
-            guard let match = volumes.first(where: { $0.mountPath == Self.normalize(mountPath) }) else {
+            guard let match = volumes.first(where: { $0.mountPath == normalize(mountPath) }) else {
                 throw ProtocolFailure(code: .notFound, message: "No mounted volume at that path", path: mountPath)
             }
             volume = match
@@ -369,8 +425,8 @@ public actor DaemonService {
         // than pretending to a detail we have not measured.
         let homeRecord: DirectoryRecord?
         if parameters.refresh {
-            cache.invalidateSubtree(configuration.home)
-            homeRecord = try? await measureDirectory(at: configuration.home, requestID: requestID)
+            invalidate(configuration.home)
+            homeRecord = try? await measureDirectory(at: configuration.home, origin: origin)
         } else {
             homeRecord = cache.record(for: configuration.home)
         }
@@ -420,14 +476,12 @@ public actor DaemonService {
 
     // MARK: - Usual suspects
 
-    private func suspects(_ parameters: SuspectsRequest, requestID: String?) async throws -> SuspectReport {
-        if !parameters.refresh, let cached = cachedSuspectReport { return cached }
+    private func suspects(_ parameters: SuspectsRequest, origin: RequestOrigin?) async throws -> SuspectReport {
+        let root = normalize(parameters.root ?? configuration.home)
+        if !parameters.refresh, let cached = cachedSuspectReport, cached.root == root { return cached.report }
 
-        let root = Self.normalize(parameters.root ?? configuration.home)
-        if parameters.refresh {
-            cachedSuspectReport = nil
-        }
-
+        let work = beginWork()
+        defer { changesDuringWork.removeValue(forKey: work) }
         let finder = self.suspectFinder
         let matches = try await scanRunner.run { _ in finder.discover(root: root) }
 
@@ -441,9 +495,9 @@ public actor DaemonService {
 
             if match.pathsAreDirectories {
                 for path in match.paths {
-                    if parameters.refresh { cache.invalidateSubtree(path) }
+                    if parameters.refresh { invalidate(path) }
                     do {
-                        let record = try await measureDirectory(at: path, requestID: requestID)
+                        let record = try await measureDirectory(at: path, origin: origin)
                         bytes += record.allocatedBytes
                         items += record.itemCount
                         unreadable.append(contentsOf: record.unreadable)
@@ -499,14 +553,17 @@ public actor DaemonService {
             scannedAt: Date(),
             unreadable: unreadable
         )
-        cachedSuspectReport = report
+        // Measured across a change, it is already stale; answer with it, but do not keep it.
+        if changesDuringWork[work]?.isEmpty ?? true {
+            cachedSuspectReport = (root, report)
+        }
         return report
     }
 
     // MARK: - Watching
 
-    private func watch(path: String, requestID: String?) async throws -> WatchedFolder {
-        let normalized = Self.normalize(path)
+    private func watch(path: String, origin: RequestOrigin?) async throws -> WatchedFolder {
+        let normalized = normalize(path)
         var info = stat()
         guard lstat(normalized, &info) == 0 else {
             throw ProtocolFailure(
@@ -519,7 +576,7 @@ public actor DaemonService {
 
         let bytes: Int64
         if (info.st_mode & S_IFMT) == S_IFDIR {
-            bytes = try await measureDirectory(at: normalized, requestID: requestID).allocatedBytes
+            bytes = try await measureDirectory(at: normalized, origin: origin).allocatedBytes
         } else {
             bytes = Int64(info.st_blocks) * 512
         }
@@ -538,7 +595,7 @@ public actor DaemonService {
     }
 
     private func unwatch(path: String) async throws -> Bool {
-        let normalized = Self.normalize(path)
+        let normalized = normalize(path)
         let removed = try await watchStore.unwatch(path: normalized)
         watchedPaths.remove(normalized)
         folderWatcher?.setWatchedPaths(Array(watchedPaths))
@@ -572,8 +629,8 @@ public actor DaemonService {
     public func sampleWatchedFolders() async {
         let paths = await watchStore.watchedPaths
         for path in paths {
-            cache.invalidateSubtree(path)
-            guard let record = try? await measureDirectory(at: path, requestID: nil) else { continue }
+            invalidate(path)
+            guard let record = try? await measureDirectory(at: path, origin: nil) else { continue }
             guard let updated = try? await watchStore.addSample(path: path, bytes: record.allocatedBytes) else {
                 continue
             }
@@ -609,16 +666,15 @@ public actor DaemonService {
     /// FSEvents saw something change under a watched folder.
     private func fileSystemChanged(paths: [String]) async {
         for path in paths {
-            cache.invalidateSubtree(path)
+            invalidate(path)
         }
-        cachedSuspectReport = nil
         eventHub.publish(.folderChanged(FolderChangedEvent(paths: paths)))
     }
 
     // MARK: - Quick Look
 
-    private func quickLook(_ parameters: QuickLookRequest, requestID: String?) async throws -> QuickLookReport {
-        let path = Self.normalize(parameters.path)
+    private func quickLook(_ parameters: QuickLookRequest, origin: RequestOrigin?) async throws -> QuickLookReport {
+        let path = normalize(parameters.path)
         var info = stat()
         guard lstat(path, &info) == 0 else {
             throw ProtocolFailure(
@@ -640,7 +696,7 @@ public actor DaemonService {
             )
         }
 
-        let record = try await measureDirectory(at: path, requestID: requestID)
+        let record = try await measureDirectory(at: path, origin: origin)
         let limit = max(1, parameters.limit)
         let items = record.children.prefix(limit).map { child in
             QuickLookItem(
@@ -667,7 +723,7 @@ public actor DaemonService {
     // MARK: - Actions
 
     private func reveal(path: String) throws {
-        let normalized = Self.normalize(path)
+        let normalized = normalize(path)
         guard FileManager.default.fileExists(atPath: normalized) else {
             throw ProtocolFailure(code: .notFound, message: "Nothing to reveal", path: normalized)
         }
@@ -679,8 +735,11 @@ public actor DaemonService {
     }
 
     private func moveToTrash(_ parameters: TrashRequest) async throws -> TrashResponse {
-        let path = Self.normalize(parameters.path)
+        let path = try trashablePath(parameters.path)
+        // The folder's own record, or failing that the size its parent's scan measured for it.
+        let parent = (path as NSString).deletingLastPathComponent
         let known = cache.record(for: path)?.allocatedBytes
+            ?? cache.record(for: parent)?.children.first(where: { $0.path == path })?.allocatedBytes
         let response = try fileActions.moveToTrash(
             path: path,
             confirmed: parameters.confirmed,
@@ -688,8 +747,7 @@ public actor DaemonService {
         )
 
         // Everything above the deleted item just got smaller, so those totals are wrong now.
-        cache.invalidateSubtree(path)
-        cachedSuspectReport = nil
+        invalidate(path)
         if watchedPaths.contains(path) {
             _ = try? await watchStore.unwatch(path: path)
             watchedPaths.remove(path)
@@ -697,9 +755,35 @@ public actor DaemonService {
             eventHub.publish(.watchRemoved(WatchRemovedEvent(path: path)))
         }
         eventHub.publish(
-            .folderChanged(FolderChangedEvent(paths: [(path as NSString).deletingLastPathComponent]))
+            .folderChanged(FolderChangedEvent(paths: [parent]))
         )
         return response
+    }
+
+    /// Only an absolute path to something that is not holding the rest up. Home, anything above it,
+    /// and the daemon's own support folder — with every folder above that — are refused: trashing
+    /// them would take the user's whole account, or the daemon's socket and history, with them.
+    private func trashablePath(_ requested: String) throws -> String {
+        guard requested.hasPrefix("/") || requested == "~" || requested.hasPrefix("~/") else {
+            throw ProtocolFailure(
+                code: .invalidParameters,
+                message: "moveToTrash needs an absolute path, not \"\(requested)\".",
+                path: requested
+            )
+        }
+        let path = normalize(requested)
+        let support = normalize(configuration.paths.supportDirectory.path)
+        func isAtOrAbove(_ protected: String) -> Bool {
+            path == "/" || path == protected || protected.hasPrefix(path + "/")
+        }
+        if isAtOrAbove(configuration.home) || isAtOrAbove(support) || path.hasPrefix(support + "/") {
+            throw ProtocolFailure(
+                code: .notPermitted,
+                message: "Jaaga will not move \(path) to the Trash: it holds your home folder or Jaaga's own state.",
+                path: path
+            )
+        }
+        return path
     }
 
     // MARK: - Building protocol entries
@@ -777,8 +861,16 @@ public actor DaemonService {
         return (try? JSONDecoder().decode(IDOnly.self, from: line))?.id
     }
 
-    static func normalize(_ path: String) -> String {
-        let expanded = (path as NSString).expandingTildeInPath
+    /// `~` means the configured home, which under `--home` is not the account's own.
+    private func normalize(_ path: String) -> String {
+        let expanded: String
+        if path == "~" {
+            expanded = configuration.home
+        } else if path.hasPrefix("~/") {
+            expanded = (configuration.home as NSString).appendingPathComponent(String(path.dropFirst(2)))
+        } else {
+            expanded = path
+        }
         let standardized = (expanded as NSString).standardizingPath
         guard standardized.count > 1, standardized.hasSuffix("/") else { return standardized }
         return String(standardized.dropLast())

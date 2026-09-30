@@ -165,9 +165,12 @@ public actor WatchStore {
         guard let document = try? decoder.decode(Document.self, from: data),
               document.version == documentVersion
         else {
-            // An unreadable or future-versioned file is left untouched on disk; starting from an
-            // empty list is better than refusing to run, and better than overwriting history we do
-            // not understand.
+            // An unreadable or future-versioned file is set aside under another name before the next
+            // save could replace it: starting from an empty list is better than refusing to run, and
+            // better than overwriting history we do not understand.
+            let aside = url.deletingLastPathComponent()
+                .appendingPathComponent("\(url.lastPathComponent).unreadable-\(Int(Date().timeIntervalSince1970))")
+            try? FileManager.default.moveItem(at: url, to: aside)
             return [:]
         }
         return Dictionary(document.records.map { (normalize($0.path), $0) }, uniquingKeysWith: { first, _ in first })

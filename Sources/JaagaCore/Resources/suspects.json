@@ -75,7 +75,8 @@
         "type": "directoryName",
         "name": "node_modules",
         "roots": ["Developer", "Projects", "Documents", "Code", "code", "src", "repos", "Sites", "work"],
-        "maxDepth": 3
+        "maxDepth": 3,
+        "manifests": ["package.json"]
       }
     },
     {
@@ -83,8 +84,8 @@
       "title": "Installers",
       "kind": "Disk images and packages",
       "category": "downloads",
-      "verdict": "safe_to_clear",
-      "reason": "Installers for apps that are already installed — {count} of them. An app does not need its installer once it has run.",
+      "verdict": "review_first",
+      "reason": "Disk images and installer packages untouched for two weeks. An installed app no longer needs its installer, but check the app is installed before deleting one.",
       "displayPath": "~/Downloads · .dmg .pkg .xip",
       "aggregate": true,
       "match": {
@@ -116,13 +117,23 @@
     },
     {
       "id": "gradle-cache",
-      "title": ".gradle",
+      "title": "Gradle caches",
       "kind": "Gradle cache",
       "category": "dev",
       "verdict": "safe_to_clear",
-      "reason": "Downloaded Gradle versions and dependencies. The next build fetches what it needs.",
-      "displayPath": "~/.gradle",
-      "match": { "type": "path", "path": ".gradle" }
+      "reason": "Downloaded dependencies and build caches. The next build fetches what it needs.",
+      "displayPath": "~/.gradle/caches",
+      "match": { "type": "path", "path": ".gradle/caches" }
+    },
+    {
+      "id": "gradle-wrapper-dists",
+      "title": "Gradle distributions",
+      "kind": "Gradle downloads",
+      "category": "dev",
+      "verdict": "safe_to_clear",
+      "reason": "Gradle versions the wrapper downloaded. The next build downloads the one it needs.",
+      "displayPath": "~/.gradle/wrapper/dists",
+      "match": { "type": "path", "path": ".gradle/wrapper/dists" }
     },
     {
       "id": "trash",

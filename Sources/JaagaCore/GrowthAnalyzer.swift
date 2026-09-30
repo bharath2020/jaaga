@@ -43,7 +43,9 @@ public struct GrowthAnalyzer: Sendable, Hashable {
     /// Summarises `samples`, which need not be sorted.
     ///
     /// Fewer than two samples means there is nothing to compare yet, so the result is all zeroes
-    /// and never alerting: a folder starred a minute ago has no history to be unusual against.
+    /// and never alerting: a folder starred a minute ago has no history to be unusual against. The
+    /// same goes for a folder with no samples from before the recent window: a missing baseline is
+    /// not a flat one.
     public func summarize(samples: [SizeSample], now: Date = Date()) -> GrowthSummary {
         let ordered = samples.sorted { $0.at < $1.at }
         guard let oldest = ordered.first, let newest = ordered.last, ordered.count >= 2 else {
@@ -56,13 +58,14 @@ public struct GrowthAnalyzer: Sendable, Hashable {
         let recentStart = now.addingTimeInterval(-recentWindow)
         let baselineStart = now.addingTimeInterval(-baselineWindow)
 
-        let recentRate = rate(in: ordered, from: recentStart, to: now)
-        let baselineRate = rate(in: ordered, from: baselineStart, to: recentStart)
+        let recentRate = rate(in: ordered, from: recentStart, to: now) ?? 0
+        let measuredBaseline = rate(in: ordered, from: baselineStart, to: recentStart)
+        let baselineRate = measuredBaseline ?? 0
 
         var factor: Double?
         var alerting = false
 
-        if recentRate >= Double(minimumRecentBytesPerDay) {
+        if measuredBaseline != nil, recentRate >= Double(minimumRecentBytesPerDay) {
             if baselineRate > 0 {
                 factor = recentRate / baselineRate
                 alerting = (factor ?? 0) >= alertFactor
@@ -86,16 +89,17 @@ public struct GrowthAnalyzer: Sendable, Hashable {
     /// Bytes per day across `[start, end]`, measured from the samples bracketing that interval.
     ///
     /// The sample just *before* `start` is included when there is one, so the rate covers the whole
-    /// window rather than only the growth between the first and last sample inside it.
-    private func rate(in ordered: [SizeSample], from start: Date, to end: Date) -> Double {
+    /// window rather than only the growth between the first and last sample inside it. `nil` when
+    /// there are not two samples spanning any of the window, so there is no rate to speak of.
+    private func rate(in ordered: [SizeSample], from start: Date, to end: Date) -> Double? {
         let inside = ordered.filter { $0.at >= start && $0.at <= end }
         let anchor = ordered.last { $0.at < start }
 
-        guard let last = inside.last else { return 0 }
-        guard let first = anchor ?? inside.first, first.at < last.at else { return 0 }
+        guard let last = inside.last else { return nil }
+        guard let first = anchor ?? inside.first, first.at < last.at else { return nil }
 
         let days = last.at.timeIntervalSince(first.at) / 86_400
-        guard days > 0 else { return 0 }
+        guard days > 0 else { return nil }
         return Double(last.bytes - first.bytes) / days
     }
 

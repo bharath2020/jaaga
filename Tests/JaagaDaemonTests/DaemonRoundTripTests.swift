@@ -85,6 +85,7 @@ private final class DaemonFixture: Sendable {
         try file("Library/Caches/Spotify/audio.bin", bytes: 300_000)
         try file("Library/Caches/Homebrew/bottle.tar", bytes: 120_000)
         try file("Library/Developer/Xcode/DerivedData/Atlas-abc/build.o", bytes: 900_000)
+        try file("Developer/ledger-web/package.json", bytes: 300)
         try file("Developer/ledger-web/node_modules/left-pad/index.js", bytes: 80_000)
         try file("Developer/ledger-web/src/main.ts", bytes: 4_000)
         try file("Movies/clip.mov", bytes: 500_000)
@@ -410,11 +411,12 @@ struct DaemonRoundTripTests {
         }
     }
 
-    @Test("An unreadable folder is reported in the listing rather than shrinking the total silently")
+    @Test(
+        "An unreadable folder is reported in the listing rather than shrinking the total silently",
+        .disabled(if: runningAsRoot, "root can read anything")
+    )
     func reportsUnreadableFolders() async throws {
         try await withDaemon { fixture in
-            try #require(!runningAsRoot, "root can read anything")
-
             try fixture.file("Readable/ok.bin", bytes: 10_000)
             let locked = try fixture.directory("Locked")
             try fixture.file("Locked/hidden.bin", bytes: 400_000)
@@ -433,10 +435,11 @@ struct DaemonRoundTripTests {
         }
     }
 
-    @Test("A child whose subtree was partly unreadable says so, so its size reads as a lower bound")
+    @Test(
+        "A child whose subtree was partly unreadable says so, so its size reads as a lower bound",
+        .disabled(if: runningAsRoot, "root can read anything")
+    )
     func childrenCarryTheirOwnUnreadableCount() async throws {
-        try #require(!runningAsRoot, "root can read anything")
-
         try await withDaemon { fixture in
             try fixture.file("Library/readable.bin", bytes: 10_000)
             let locked = try fixture.directory("Library/Locked")
@@ -464,6 +467,222 @@ struct DaemonRoundTripTests {
             #expect(lockedItem.unreadableDescendantCount == 1)
 
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+        }
+    }
+
+    @Test(
+        "A subfolder opened from the cache after its parent's scan is still marked incomplete",
+        .disabled(if: runningAsRoot, "root can read anything")
+    )
+    func cachedSubfolderKeepsItsUnreadableCaveat() async throws {
+        try await withDaemon { fixture in
+            try fixture.file("Library/Preferences/p.plist", bytes: 2_000)
+            let locked = try fixture.directory("Library/Mail")
+            try fixture.file("Library/Mail/inbox.bin", bytes: 300_000)
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+
+            _ = try await fixture.client.listFolder(path: fixture.home.path)
+            let library = try await fixture.client.listFolder(path: fixture.home.appendingPathComponent("Library").path)
+
+            #expect(library.fromCache, "the home scan already measured Library")
+            #expect(library.complete == false, "the ~/Library the captain opened must still say 'at least'")
+            #expect(library.folder.isComplete == false)
+            #expect(library.unreadable.map(\.path) == [locked.path])
+
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+        }
+    }
+
+    @Test("Moving to the Trash takes only an absolute path, and never home, above it, or Jaaga's own state")
+    func trashRefusesDangerousPaths() async throws {
+        try await withDaemon { fixture in
+            try fixture.file("Movies/clip.mov", bytes: 1_000)
+            let support = fixture.daemon.configuration.paths.supportDirectory.path
+
+            let refused: [(String, ErrorCode)] = [
+                ("Movies/clip.mov", .invalidParameters),
+                (fixture.home.path, .notPermitted),
+                ((fixture.home.path as NSString).deletingLastPathComponent, .notPermitted),
+                ("~", .notPermitted),
+                (support, .notPermitted),
+                (fixture.daemon.configuration.paths.socketPath, .notPermitted),
+            ]
+            for (path, code) in refused {
+                let failure = await #expect(throws: ProtocolFailure.self, "\(path) must be refused") {
+                    try await fixture.client.moveToTrash(path: path, confirmed: true)
+                }
+                #expect(failure?.code == code, "\(path)")
+            }
+            #expect(FileManager.default.fileExists(atPath: fixture.home.path))
+            #expect(FileManager.default.fileExists(atPath: fixture.daemon.configuration.paths.socketPath))
+        }
+    }
+
+    @Test("A path starting with ~ means the daemon's home, not the account's")
+    func tildeMeansTheConfiguredHome() async throws {
+        try await withDaemon { fixture in
+            let name = "jaaga-tilde-\(UUID().uuidString).bin"
+            let file = try fixture.file(name, bytes: 1_000)
+
+            let response = try await fixture.client.moveToTrash(path: "~/\(name)", confirmed: true)
+
+            #expect(response.originalPath == file.path)
+            #expect(FileManager.default.fileExists(atPath: file.path) == false)
+            if let trashed = response.trashedPath { try? FileManager.default.removeItem(atPath: trashed) }
+        }
+    }
+
+    @Test("The suspects report answers for the root that was asked about, not the last one measured")
+    func suspectsFollowTheirRoot() async throws {
+        try await withDaemon { fixture in
+            try fixture.file("Library/Caches/app/blob.bin", bytes: 10_000)
+            try fixture.file("Other/Library/Caches/app/blob.bin", bytes: 10_000)
+            let other = fixture.home.appendingPathComponent("Other").path
+
+            let home = try await fixture.client.suspects()
+            let elsewhere = try await fixture.client.suspects(root: other)
+
+            #expect(home.suspects.flatMap(\.paths).allSatisfy { !$0.hasPrefix(other + "/") })
+            #expect(!elsewhere.suspects.isEmpty)
+            #expect(elsewhere.suspects.flatMap(\.paths).allSatisfy { $0.hasPrefix(other + "/") })
+        }
+    }
+
+    @Test("A request id belongs to the client that chose it: another client cannot cancel it")
+    func requestIDsArePerConnection() async throws {
+        try await withDaemon { fixture in
+            for index in 0..<8_000 {
+                try fixture.file("Huge/dir-\(index % 80)/file-\(index).bin", bytes: 1_024)
+            }
+            let huge = fixture.home.appendingPathComponent("Huge").path
+
+            let owner = try RawSocketClient(socketPath: fixture.daemon.socketPath)
+            defer { owner.close() }
+            let stranger = try RawSocketClient(socketPath: fixture.daemon.socketPath)
+            defer { stranger.close() }
+
+            try owner.send(#"{"v":1,"id":"1","method":"listFolder","params":{"path":"\#(huge)"}}"#)
+            try await Task.sleep(for: .milliseconds(10))
+            let cancel = try stranger.exchange(#"{"v":1,"id":"2","method":"cancel","params":{"requestID":"1"}}"#)
+
+            let result = try #require(cancel["result"] as? [String: Any])
+            #expect(result["ok"] as? Bool == false, "the stranger has no request 1 to cancel")
+            let answer = try owner.receive()
+            #expect(answer["type"] as? String == "response", "the owner's scan must run to completion")
+        }
+    }
+
+    @Test("A cancel sent right behind its request is taken after it, never before")
+    func framesAreTakenInOrder() async throws {
+        try await withDaemon { fixture in
+            for index in 0..<4_000 {
+                try fixture.file("Huge/dir-\(index % 40)/file-\(index).bin", bytes: 1_024)
+            }
+            let huge = fixture.home.appendingPathComponent("Huge").path
+            let raw = try RawSocketClient(socketPath: fixture.daemon.socketPath)
+            defer { raw.close() }
+
+            // One write, two frames: the order on the wire is the only order there is.
+            try raw.send(
+                #"{"v":1,"id":"1","method":"listFolder","params":{"path":"\#(huge)"}}"# + "\n"
+                    + #"{"v":1,"id":"2","method":"cancel","params":{"requestID":"1"}}"#
+            )
+            var replies: [String: [String: Any]] = [:]
+            while replies.count < 2 {
+                let reply = try raw.receive()
+                if let id = reply["id"] as? String { replies[id] = reply }
+            }
+
+            let cancel = try #require(replies["2"]?["result"] as? [String: Any])
+            #expect(cancel["ok"] as? Bool == true, "the request was in flight when its cancel arrived")
+            let error = try #require(replies["1"]?["error"] as? [String: Any])
+            #expect(error["code"] as? String == ErrorCode.cancelled.rawValue)
+        }
+    }
+
+    @Test("Scan progress names its request only to the client that made it")
+    func progressIsAttributedOnlyToItsOwner() async throws {
+        try await withDaemon(configure: { configuration in
+            configuration.scan = ScanConfiguration(recordDepth: 2, progressInterval: 4)
+        }) { fixture in
+            for index in 0..<80 {
+                try fixture.file("Many/file-\(index).bin", bytes: 4_096)
+            }
+            let observer = DaemonClient(socketPath: fixture.daemon.socketPath, timeout: .seconds(30))
+            try await observer.connect(clientName: "observer")
+
+            func requestIDs(from events: AsyncStream<Event>) -> Task<[String?], Never> {
+                Task {
+                    var ids: [String?] = []
+                    for await event in events {
+                        switch event {
+                        case .scanProgress(let progress): ids.append(progress.requestID)
+                        case .scanCompleted(let completed):
+                            ids.append(completed.requestID)
+                            return ids
+                        default: continue
+                        }
+                    }
+                    return ids
+                }
+            }
+            let mine = requestIDs(from: await fixture.client.events())
+            let theirs = requestIDs(from: await observer.events())
+
+            _ = try await fixture.client.listFolder(path: fixture.home.appendingPathComponent("Many").path)
+
+            let ownIDs = await mine.value
+            let otherIDs = await theirs.value
+            #expect(!ownIDs.isEmpty && ownIDs.allSatisfy { $0 != nil })
+            #expect(!otherIDs.isEmpty && otherIDs.allSatisfy { $0 == nil }, "an id means nothing to another client")
+            await observer.disconnect()
+        }
+    }
+
+    @Test("A client that stops reading does not stall the daemon for everyone else")
+    func aStuckClientDoesNotBlockOthers() async throws {
+        try await withDaemon { fixture in
+            let stuck = try RawSocketClient(socketPath: fixture.daemon.socketPath)
+            defer { stuck.close() }
+
+            // Far more answer than a socket buffer holds, and never read.
+            let requests = (1...400).map { #"{"v":1,"id":"\#($0)","method":"volumes"}"# }
+            try stuck.send(requests.joined(separator: "\n"))
+            try await Task.sleep(for: .milliseconds(200))
+
+            let answered = try await fixture.client.volumes()
+            #expect(!answered.volumes.isEmpty)
+        }
+    }
+
+    @Test("A listing too big for the request size limit still reaches the client")
+    func largeResponsesArrive() async throws {
+        try await withDaemon { fixture in
+            let longName = String(repeating: "n", count: 200)
+            let folder = try fixture.directory("Wide")
+            for index in 0..<12_000 {
+                FileManager.default.createFile(atPath: folder.appendingPathComponent("\(longName)-\(index)").path, contents: nil)
+            }
+
+            let listing = try await fixture.client.listFolder(path: folder.path)
+
+            #expect(listing.children.count == 12_000)
+        }
+    }
+
+    @Test("A request that outlives the client's timeout fails with timedOut instead of waiting on")
+    func timeoutIsEnforced() async throws {
+        try await withDaemon { fixture in
+            for index in 0..<8_000 {
+                try fixture.file("Huge/dir-\(index % 80)/file-\(index).bin", bytes: 1_024)
+            }
+            let impatient = DaemonClient(socketPath: fixture.daemon.socketPath, timeout: .milliseconds(1))
+            _ = try? await impatient.connect(clientName: "impatient")
+
+            await #expect(throws: DaemonClient.ClientError.self) {
+                _ = try await impatient.listFolder(path: fixture.home.appendingPathComponent("Huge").path)
+            }
+            await impatient.disconnect()
         }
     }
 
@@ -600,11 +819,15 @@ struct DaemonRoundTripTests {
                 try fixture.file("Huge/dir-\(index % 80)/file-\(index).bin", bytes: 1_024)
             }
 
+            let events = await fixture.client.events()
             let scan = Task {
                 try await fixture.client.listFolder(path: fixture.home.appendingPathComponent("Huge").path)
             }
-            // Long enough for the request to be registered and the scan to be under way.
-            try await Task.sleep(for: .milliseconds(20))
+            // Cancel once the daemon says the scan is under way, not after a guessed delay: a fast
+            // disk finishes this tree in about the time a fixed sleep would wait.
+            for await event in events {
+                if case .scanProgress = event { break }
+            }
             scan.cancel()
 
             await #expect(throws: CancellationError.self) {
@@ -694,18 +917,29 @@ private final class RawSocketClient {
         }
     }
 
+    private var pending = Data()
+
     /// Sends one line and returns the first non-event frame that comes back.
     func exchange(_ line: String) throws -> [String: Any] {
+        try send(line)
+        return try receive()
+    }
+
+    /// Writes `line` and a newline, without waiting for anything back.
+    func send(_ line: String) throws {
         let payload = Array((line + "\n").utf8)
-        _ = payload.withUnsafeBufferPointer { write(descriptor, $0.baseAddress, $0.count) }
+        var sent = 0
+        while sent < payload.count {
+            let written = payload.withUnsafeBufferPointer { write(descriptor, $0.baseAddress! + sent, $0.count - sent) }
+            guard written > 0 else { throw DaemonClient.ClientError.disconnected }
+            sent += written
+        }
+    }
 
+    /// Returns the next non-event frame.
+    func receive() throws -> [String: Any] {
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        var pending = Data()
         while true {
-            let count = read(descriptor, &buffer, buffer.count)
-            guard count > 0 else { throw DaemonClient.ClientError.disconnected }
-            pending.append(contentsOf: buffer[0..<count])
-
             while let newline = pending.firstIndex(of: 0x0A) {
                 let frame = Data(pending[pending.startIndex..<newline])
                 pending.removeSubrange(pending.startIndex...newline)
@@ -715,6 +949,9 @@ private final class RawSocketClient {
                 if object["type"] as? String == "event" { continue }
                 return object
             }
+            let count = read(descriptor, &buffer, buffer.count)
+            guard count > 0 else { throw DaemonClient.ClientError.disconnected }
+            pending.append(contentsOf: buffer[0..<count])
         }
     }
 
