@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "comment": "The usual suspects: folders that grow quietly and mostly come back on their own. Paths are relative to the scan root (normally the user's home folder). Add your own rules to ~/Library/Application Support/Jaaga/suspects.json; a rule with an id used here replaces it.",
+  "rules": [
+    {
+      "id": "xcode-derived-data",
+      "title": "DerivedData",
+      "kind": "Xcode build cache",
+      "category": "dev",
+      "verdict": "safe_to_clear",
+      "reason": "Xcode rebuilds this the next time you build. Clearing it is also the classic fix for strange build errors.",
+      "displayPath": "~/Library/Developer/Xcode/DerivedData",
+      "match": { "type": "path", "path": "Library/Developer/Xcode/DerivedData" }
+    },
+    {
+      "id": "core-simulator-devices",
+      "title": "CoreSimulator",
+      "kind": "Simulator devices",
+      "category": "dev",
+      "verdict": "review_first",
+      "reason": "Simulator devices and the apps installed on them. Devices for runtimes you no longer have are dead weight, but deleting a device loses its state.",
+      "displayPath": "~/Library/Developer/CoreSimulator/Devices",
+      "match": { "type": "path", "path": "Library/Developer/CoreSimulator/Devices" }
+    },
+    {
+      "id": "ios-device-support",
+      "title": "iOS DeviceSupport",
+      "kind": "Debug symbols",
+      "category": "dev",
+      "verdict": "safe_to_clear",
+      "reason": "Symbols for iOS versions your devices no longer run. Xcode fetches them again when you plug a device in.",
+      "displayPath": "~/Library/Developer/Xcode/iOS DeviceSupport",
+      "match": { "type": "path", "path": "Library/Developer/Xcode/iOS DeviceSupport" }
+    },
+    {
+      "id": "user-caches",
+      "title": "Caches",
+      "kind": "Cache folder",
+      "category": "cache",
+      "verdict": "safe_to_clear",
+      "reason": "Temporary copies apps keep so they load faster. Apps rebuild what they need, so clearing this is safe.",
+      "displayPath": "~/Library/Caches",
+      "match": { "type": "path", "path": "Library/Caches" }
+    },
+    {
+      "id": "docker-disk-image",
+      "title": "Docker.raw",
+      "kind": "Docker disk image",
+      "category": "dev",
+      "verdict": "review_first",
+      "reason": "One disk image holding every Docker image and volume. Shrink it with docker system prune or from Docker Desktop settings, not the Finder.",
+      "displayPath": "~/Library/Containers/com.docker.docker/…/Docker.raw",
+      "match": { "type": "path", "path": "Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw" }
+    },
+    {
+      "id": "iphone-backups",
+      "title": "iPhone Backups",
+      "kind": "Device backups",
+      "category": "apps",
+      "verdict": "review_first",
+      "reason": "Local iPhone and iPad backups made by the Finder. Keep your newest one; older ones are usually safe to remove.",
+      "displayPath": "~/Library/Application Support/MobileSync/Backup",
+      "match": { "type": "path", "path": "Library/Application Support/MobileSync/Backup" }
+    },
+    {
+      "id": "node-modules",
+      "title": "node_modules",
+      "kind": "Dependencies across projects",
+      "category": "dev",
+      "verdict": "safe_to_clear",
+      "reason": "Found in {count} project{s}. npm install brings any of them back in seconds, and nothing you wrote lives in here.",
+      "displayPath": "~/…/node_modules",
+      "aggregate": true,
+      "match": {
+        "type": "directoryName",
+        "name": "node_modules",
+        "roots": ["Developer", "Projects", "Documents", "Code", "code", "src", "repos", "Sites", "work"],
+        "maxDepth": 3
+      }
+    },
+    {
+      "id": "downloads-installers",
+      "title": "Installers",
+      "kind": "Disk images and packages",
+      "category": "downloads",
+      "verdict": "safe_to_clear",
+      "reason": "Installers for apps that are already installed — {count} of them. An app does not need its installer once it has run.",
+      "displayPath": "~/Downloads · .dmg .pkg .xip",
+      "aggregate": true,
+      "match": {
+        "type": "filesWithExtensions",
+        "extensions": ["dmg", "pkg", "xip", "iso", "mpkg"],
+        "root": "Downloads",
+        "minimumAgeDays": 14
+      }
+    },
+    {
+      "id": "xcode-archives",
+      "title": "Xcode Archives",
+      "kind": "Xcode archives",
+      "category": "dev",
+      "verdict": "review_first",
+      "reason": "Builds you shipped. Keep the ones you might still need to read crash reports from.",
+      "displayPath": "~/Library/Developer/Xcode/Archives",
+      "match": { "type": "path", "path": "Library/Developer/Xcode/Archives" }
+    },
+    {
+      "id": "homebrew-cache",
+      "title": "Homebrew downloads",
+      "kind": "Package cache",
+      "category": "cache",
+      "verdict": "safe_to_clear",
+      "reason": "Old package downloads. brew cleanup clears them too.",
+      "displayPath": "~/Library/Caches/Homebrew",
+      "match": { "type": "path", "path": "Library/Caches/Homebrew" }
+    },
+    {
+      "id": "gradle-cache",
+      "title": ".gradle",
+      "kind": "Gradle cache",
+      "category": "dev",
+      "verdict": "safe_to_clear",
+      "reason": "Downloaded Gradle versions and dependencies. The next build fetches what it needs.",
+      "displayPath": "~/.gradle",
+      "match": { "type": "path", "path": ".gradle" }
+    },
+    {
+      "id": "trash",
+      "title": "Trash",
+      "kind": "Deleted items",
+      "category": "system",
+      "verdict": "safe_to_clear",
+      "reason": "Items you already chose to delete. Emptying the Trash is what finally frees the space.",
+      "displayPath": "~/.Trash",
+      "match": { "type": "path", "path": ".Trash" }
+    }
+  ]
+}

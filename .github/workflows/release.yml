@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing v* tag to build a release for
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Select the newest Xcode
+        # Pinning an exact Xcode path breaks whenever the runner image moves on; take the newest one
+        # the image has and print it, so a toolchain change shows up in the log rather than as a
+        # mystery failure.
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$latest" ] || latest=/Applications/Xcode.app
+          sudo xcode-select -switch "$latest"
+          swift --version
+
+      - name: Work out the version
+        id: version
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: swift test
+
+      - name: Build the app
+        run: |
+          Scripts/bundle-app.sh \
+            --configuration release \
+            --version "${{ steps.version.outputs.version }}" \
+            --build "${{ github.run_number }}" \
+            --output build
+
+      - name: Package the assets
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          mkdir -p artifacts
+
+          # The app, zipped with ditto so the bundle's symlinks and signature survive.
+          ditto -c -k --keepParent --sequesterRsrc build/Jaaga.app "artifacts/Jaaga-$version-macos-arm64.zip"
+
+          # The daemon on its own, for anyone running it headless or writing a client against it.
+          mkdir -p "staging/jaagad-$version"
+          cp build/Jaaga.app/Contents/MacOS/jaagad "staging/jaagad-$version/"
+          cp -R build/Jaaga.app/Contents/Resources/*_JaagaCore.bundle "staging/jaagad-$version/"
+          cp docs/protocol.md "staging/jaagad-$version/"
+          ditto -c -k --keepParent "staging/jaagad-$version" "artifacts/jaagad-$version-macos-arm64.zip"
+
+          ( cd artifacts && shasum -a 256 *.zip > SHA256SUMS.txt )
+          ls -la artifacts
+
+      - name: Write the release notes
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          cat > notes.md <<EOF
+          Jaaga $version — still under construction. Expect rough edges and protocol changes.
+
+          ## Assets
+
+          | File | |
+          |---|---|
+          | \`Jaaga-$version-macos-arm64.zip\` | The app, with the daemon inside it |
+          | \`jaagad-$version-macos-arm64.zip\` | Just the daemon, plus \`protocol.md\`, for writing a client |
+          | \`SHA256SUMS.txt\` | Checksums |
+
+          Apple silicon, macOS 15 or later.
+
+          ## These builds are unsigned
+
+          They are **not signed with a Developer ID and not notarized**, so Gatekeeper will refuse them
+          on first launch. Signing and notarization are not set up yet.
+
+          To open one anyway, after satisfying yourself that you trust it:
+
+          \`\`\`sh
+          # Unzip, then strip the quarantine flag the browser attached:
+          xattr -dr com.apple.quarantine /Applications/Jaaga.app
+          open /Applications/Jaaga.app
+          \`\`\`
+
+          Or right-click the app, choose **Open**, and confirm — then allow it under
+          **System Settings › Privacy & Security** if macOS asks.
+
+          Because the app is not signed, registering the background daemon as a LaunchAgent may be
+          refused; Jaaga falls back to running the daemon itself and says so in the window. See the
+          README for Full Disk Access, which it needs to measure everything.
+
+          Building it yourself avoids all of this: \`Scripts/bundle-app.sh\`.
+          EOF
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "Jaaga ${{ steps.version.outputs.version }}" \
+            --notes-file notes.md \
+            --prerelease \
+            artifacts/*
