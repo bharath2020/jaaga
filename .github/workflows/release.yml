@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing v* tag to build a release for
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Select the newest Xcode
+        # Pinning an exact Xcode path breaks whenever the runner image moves on; take the newest one
+        # the image has and print it, so a toolchain change shows up in the log rather than as a
+        # mystery failure.
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$latest" ] || latest=/Applications/Xcode.app
+          sudo xcode-select -switch "$latest"
+          swift --version
+
+      - name: Work out the version
+        id: version
+        # Through the environment, never spliced into the script: a tag name is user input.
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          tag="$TAG"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: swift test
+
+      - name: Build the app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          Scripts/bundle-app.sh \
+            --configuration release \
+            --version "$VERSION" \
+            --build "$BUILD_NUMBER" \
+            --output build
+
+      - name: Package the assets
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          version="$VERSION"
+          mkdir -p artifacts
+
+          # The app, zipped with ditto so the bundle's symlinks and signature survive.
+          ditto -c -k --keepParent --sequesterRsrc build/Jaaga.app "artifacts/Jaaga-$version-macos-arm64.zip"
+
+          # The daemon on its own, for anyone running it headless or writing a client against it.
+          mkdir -p "staging/jaagad-$version"
+          cp build/Jaaga.app/Contents/MacOS/jaagad "staging/jaagad-$version/"
+          cp -R build/Jaaga.app/Contents/Resources/*_JaagaCore.bundle "staging/jaagad-$version/"
+          cp docs/protocol.md "staging/jaagad-$version/"
+          ditto -c -k --keepParent "staging/jaagad-$version" "artifacts/jaagad-$version-macos-arm64.zip"
+
+          ( cd artifacts && shasum -a 256 *.zip > SHA256SUMS.txt )
+          ls -la artifacts
+
+      - name: Write the release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          version="$VERSION"
+          cat > notes.md <<EOF
+          Jaaga $version — still under construction. Expect rough edges and protocol changes.
+
+          ## Assets
+
+          | File | |
+          |---|---|
+          | \`Jaaga-$version-macos-arm64.zip\` | The app, with the daemon inside it |
+          | \`jaagad-$version-macos-arm64.zip\` | Just the daemon, plus \`protocol.md\`, for writing a client |
+          | \`SHA256SUMS.txt\` | Checksums |
+
+          Apple silicon, macOS 15 or later.
+
+          ## These builds are unsigned
+
+          They are **not signed with a Developer ID and not notarized**, so Gatekeeper will refuse them
+          on first launch. Signing and notarization are not set up yet.
+
+          To open one anyway, after satisfying yourself that you trust it:
+
+          \`\`\`sh
+          # Unzip, then strip the quarantine flag the browser attached:
+          xattr -dr com.apple.quarantine /Applications/Jaaga.app
+          open /Applications/Jaaga.app
+          \`\`\`
+
+          Or, without a terminal: try to open the app once and dismiss the warning, then go to
+          **System Settings › Privacy & Security**, scroll to the message about Jaaga, click
+          **Open Anyway**, and confirm. (On macOS 15, right-click › Open no longer gets past
+          Gatekeeper.)
+
+          Because the app is not signed, registering the background daemon as a LaunchAgent may be
+          refused; Jaaga falls back to running the daemon itself and says so in the window. See the
+          README for Full Disk Access, which it needs to measure everything.
+
+          Building it yourself avoids all of this: \`Scripts/bundle-app.sh\`.
+          EOF
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            --title "Jaaga $VERSION" \
+            --notes-file notes.md \
+            --prerelease \
+            artifacts/*

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The per-user LaunchAgent the app registers with SMAppService. It lives inside the app bundle
+	     at Contents/Library/LaunchAgents, which is where SMAppService.agent(plistName:) looks. -->
+	<key>Label</key>
+	<string>com.jaaga.daemon</string>
+	<!-- BundleProgram is relative to the app bundle, so the daemon ships inside the app and there is
+	     never a version mismatch between the two. -->
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/jaagad</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<!-- Restart it if it crashes, but not if it exits cleanly (which is how it answers SIGTERM). -->
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.jaaga.app</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/tmp/jaagad.log</string>
+</dict>
+</plist>

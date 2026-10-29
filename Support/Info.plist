@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>JaagaApp</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.jaaga.app</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Jaaga</string>
+	<key>CFBundleDisplayName</key>
+	<string>Jaaga</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__BUILD__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- Jaaga reads the whole home folder to measure it. Without Full Disk Access some folders come
+	     back unreadable, which the interface reports rather than quietly undercounting. -->
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Jaaga measures how much disk space your Desktop is using.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Jaaga measures how much disk space your Documents folder is using.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Jaaga measures how much disk space your Downloads folder is using, and finds old installers in it.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Jaaga measures how much space is used on external volumes you ask it to look at.</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+</dict>
+</plist>

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    # Jaaga targets macOS 15, so it needs a runner at least that new.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the newest Xcode
+        # Pinning an exact Xcode path breaks whenever the runner image moves on; take the newest one
+        # the image has and print it, so a toolchain change shows up in the log rather than as a
+        # mystery failure.
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$latest" ] || latest=/Applications/Xcode.app
+          sudo xcode-select -switch "$latest"
+          swift --version
+
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        # The daemon tests bind real Unix domain sockets under /tmp and scan real temporary trees,
+        # which works fine on a runner; they are serialized so they never fight over a socket.
+        run: swift test --skip-build
+
+      - name: Assemble the app bundle
+        run: Scripts/bundle-app.sh --configuration debug
+
+      - name: Check the bundle has what it needs
+        run: |
+          app=.build/debug/Jaaga.app
+          for required in \
+            "$app/Contents/MacOS/JaagaApp" \
+            "$app/Contents/MacOS/jaagad" \
+            "$app/Contents/Info.plist" \
+            "$app/Contents/Library/LaunchAgents/com.jaaga.daemon.plist"
+          do
+            test -e "$required" || { echo "missing: $required"; exit 1; }
+          done
+          # The usual-suspects catalog is a resource, so a packaging mistake would only show at runtime.
+          ls -d "$app"/Contents/Resources/*_JaagaCore.bundle
